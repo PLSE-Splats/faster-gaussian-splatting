@@ -17,12 +17,15 @@
  * @param value Value to append.
  */
 void append_single_value(const char* filename, const uint value) {
-  if (std::ofstream file(filename, std::ios::app); file.is_open()) {
-    file << value << std::endl;
-    file.close();
-  } else {
+  // Open file.
+  std::ofstream file(filename, std::ios::app);
+  if (!file.is_open()) {
     std::cerr << "Could not open file " << filename << std::endl;
+    return;
   }
+
+  // Append value.
+  file << value << std::endl;
 }
 
 /**
@@ -33,14 +36,24 @@ void append_single_value(const char* filename, const uint value) {
  */
 void append_vector_value(const char* filename,
                          const std::vector<uint>& values) {
-  if (std::ofstream file(filename, std::ios::app); file.is_open()) {
-    for (const uint value : values) {
-      file << value << std::endl;
-    }
-    file.close();
-  } else {
+  // Open file.
+  std::ofstream file(filename, std::ios::app);
+  if (!file.is_open()) {
     std::cerr << "Could not open file " << filename << std::endl;
+    return;
   }
+
+  // Write to buffer.
+  std::string buffer;
+  buffer.reserve(1024 * 1024);
+
+  for (const auto& value : values) {
+    buffer += std::to_string(value);
+    buffer += "\n";
+  }
+
+  // Append buffer.
+  file << buffer;
 }
 
 // sorting is done separately for depth and tile as proposed in
@@ -133,7 +146,6 @@ void faster_gs::rasterization::inference(
   // Create buffer for contributing splats.
   uint* d_splats_per_pixel;
   cudaMalloc(&d_splats_per_pixel, sizeof(uint) * width * height);
-  cudaMemset(d_splats_per_pixel, 0, sizeof(uint) * width * height);
 
 // with 16x16 tiles, 16 bit keys are sufficient for up to 16M pixels, i.e.,
 // 4Kx4K images beyond that, 32 bit keys are needed and for best performance, we
@@ -158,16 +170,16 @@ void faster_gs::rasterization::inference(
     splats_per_tile[i] = h_instance_ranges[i].y - h_instance_ranges[i].x;
   }
 
-  std::vector<uint> h_splats_per_pixel(n_tiles);
+  std::vector<uint> h_splats_per_pixel(width * height);
   cudaMemcpy(h_splats_per_pixel.data(), d_splats_per_pixel,
              sizeof(uint) * width * height, cudaMemcpyDeviceToHost);
+  cudaFree(d_splats_per_pixel);
 
   // Export metrics.
-  // append_single_value("n_visible_primitives.csv", n_visible_primitives);
-  // append_single_value("n_instances.csv", n_instances);
-  // append_vector_value("splats_per_tile.csv", splats_per_tile);
-  // append_vector_value("splats_per_pixel.csv", h_splats_per_pixel);
-  cudaFree(d_splats_per_pixel);
+  append_single_value("n_visible_primitives.csv", n_visible_primitives);
+  append_single_value("n_instances.csv", n_instances);
+  append_vector_value("splats_per_tile.csv", splats_per_tile);
+  append_vector_value("splats_per_pixel.csv", h_splats_per_pixel);
 }
 
 template <typename KeyT>
