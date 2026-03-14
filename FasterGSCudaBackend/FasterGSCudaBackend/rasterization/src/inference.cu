@@ -1,5 +1,7 @@
 #include <cub/cub.cuh>
+#include <fstream>
 #include <functional>
+#include <iostream>
 
 #include "buffer_utils.h"
 #include "helper_math.h"
@@ -7,6 +9,39 @@
 #include "kernels_inference.cuh"
 #include "rasterization_config.h"
 #include "utils.h"
+
+/**
+ * Append a single value to a file and close.
+ *
+ * @param filename Filename to append data to.
+ * @param value Value to append.
+ */
+void append_single_value(const char* filename, const uint value) {
+  if (std::ofstream file(filename, std::ios::app); file.is_open()) {
+    file << value << std::endl;
+    file.close();
+  } else {
+    std::cerr << "Could not open file " << filename << std::endl;
+  }
+}
+
+/**
+ * Append a vector of values to a file and close.
+ *
+ * @param filename Filename to append data to.
+ * @param values Vector of values to append.
+ */
+void append_vector_value(const char* filename,
+                         const std::vector<uint>& values) {
+  if (std::ofstream file(filename, std::ios::app); file.is_open()) {
+    for (const uint value : values) {
+      file << value << std::endl;
+    }
+    file.close();
+  } else {
+    std::cerr << "Could not open file " << filename << std::endl;
+  }
+}
 
 // sorting is done separately for depth and tile as proposed in
 // https://github.com/m-schuetz/Splatshop
@@ -95,6 +130,11 @@ void faster_gs::rasterization::inference(
   CHECK_CUDA(config::debug,
              "cub::DeviceScan::ExclusiveSum (primitive_buffers.offset)")
 
+  // Create buffer for contributing splats.
+  uint* d_splats_per_pixel;
+  cudaMalloc(&d_splats_per_pixel, sizeof(uint) * width * height);
+  cudaMemset(d_splats_per_pixel, 0, sizeof(uint) * width * height);
+
 // with 16x16 tiles, 16 bit keys are sufficient for up to 16M pixels, i.e.,
 // 4Kx4K images beyond that, 32 bit keys are needed and for best performance, we
 // template the remaining rasterization steps note that with c++20 one could use
@@ -102,12 +142,32 @@ void faster_gs::rasterization::inference(
 #define RASTERIZE_ARGS                                                   \
   resize_instance_buffers, primitive_buffers, tile_buffers, grid, block, \
       bg_color, image, memset_stream, n_visible_primitives, n_instances, \
-      end_bit, width, height, to_chw
+      end_bit, d_splats_per_pixel, width, height, to_chw
   if (end_bit <= 16)
     rasterize<ushort>(RASTERIZE_ARGS);
   else
     rasterize<uint>(RASTERIZE_ARGS);
 #undef RASTERIZE_ARGS
+
+  // Download metrics.
+  std::vector<uint2> h_instance_ranges(n_tiles);
+  cudaMemcpy(h_instance_ranges.data(), tile_buffers.instance_ranges,
+             sizeof(uint2) * n_tiles, cudaMemcpyDeviceToHost);
+  std::vector<uint> splats_per_tile(n_tiles);
+  for (int i = 0; i < n_tiles; ++i) {
+    splats_per_tile[i] = h_instance_ranges[i].y - h_instance_ranges[i].x;
+  }
+
+  std::vector<uint> h_splats_per_pixel(n_tiles);
+  cudaMemcpy(h_splats_per_pixel.data(), d_splats_per_pixel,
+             sizeof(uint) * width * height, cudaMemcpyDeviceToHost);
+
+  // Export metrics.
+  // append_single_value("n_visible_primitives.csv", n_visible_primitives);
+  // append_single_value("n_instances.csv", n_instances);
+  // append_vector_value("splats_per_tile.csv", splats_per_tile);
+  // append_vector_value("splats_per_pixel.csv", h_splats_per_pixel);
+  cudaFree(d_splats_per_pixel);
 }
 
 template <typename KeyT>
@@ -116,8 +176,8 @@ void faster_gs::rasterization::rasterize(
     PrimitiveBuffers& primitive_buffers, TileBuffers& tile_buffers,
     const dim3& grid, const dim3& block, const float3* bg_color, float* image,
     const cudaStream_t memset_stream, const int n_visible_primitives,
-    const int n_instances, const int end_bit, const int width, const int height,
-    const bool to_chw) {
+    const int n_instances, const int end_bit, uint* splats_per_pixel,
+    const int width, const int height, const bool to_chw) {
   char* instance_buffers_blob = resize_instance_buffers(
       required<InstanceBuffers<KeyT>>(n_instances, end_bit));
   InstanceBuffers<KeyT> instance_buffers = InstanceBuffers<KeyT>::from_blob(
@@ -155,6 +215,6 @@ void faster_gs::rasterization::rasterize(
       tile_buffers.instance_ranges,
       instance_buffers.primitive_indices.Current(), primitive_buffers.mean2d,
       primitive_buffers.conic_opacity, primitive_buffers.color, bg_color, image,
-      width, height, grid.x, to_chw);
+      splats_per_pixel, width, height, grid.x, to_chw);
   CHECK_CUDA(config::debug, "blend")
 }

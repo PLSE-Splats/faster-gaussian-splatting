@@ -379,6 +379,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
              const float4* __restrict__ primitive_conic_opacity,
              const float3* __restrict__ primitive_color,
              const float3* __restrict__ bg_color, float* __restrict__ image,
+             uint* __restrict__ splats_per_pixel,
              const uint width, const uint height, const uint grid_width,
              const bool output_chw) {
   auto block = cg::this_thread_block();
@@ -399,6 +400,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
   // initialize local storage
   float3 color_pixel = make_float3(0.0f);
   float transmittance = 1.0f;
+  uint contributing_splats = 0;
   bool done = !inside;
   // collaborative loading and processing
   const uint2 tile_range =
@@ -435,6 +437,8 @@ __global__ void __launch_bounds__(config::block_size_blend)
       if (config::original_opacity_interpretation &&
           alpha < config::min_alpha_threshold)
         continue;
+      
+      contributing_splats++;
 
       // blend fragment into pixel color
       color_pixel += transmittance * alpha * collected_color[j];
@@ -465,6 +469,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
       image[base_idx + 1] = __saturatef(color_pixel.y);
       image[base_idx + 2] = __saturatef(color_pixel.z);
     }
+    splats_per_pixel[pixel_idx] = contributing_splats;
   }
 }
 
