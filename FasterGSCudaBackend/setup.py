@@ -9,7 +9,7 @@ __author__ = 'Florian Hahlbohm'
 __description__ = 'A refactored CUDA implementation of the 3DGS rasterizer.'
 
 ENABLE_FASTMATH = True  # set to False to disable fast math optimizations (e.g., for debugging)
-ENABLE_NVCC_LINEINFO = False  # set to True for profiling kernels with Nsight Compute (overhead is minimal)
+ENABLE_NVCC_LINEINFO = True  # set to True for profiling kernels with Nsight Compute (overhead is minimal)
 
 module_root = Path(__file__).parent.absolute()
 extension_name = module_root.name
