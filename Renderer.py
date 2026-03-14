@@ -45,7 +45,7 @@ def extract_settings(
 @Framework.Configurable.configure(
     SCALE_MODIFIER=1.0,
     PROPER_ANTIALIASING=False,
-    FORCE_OPTIMIZED_INFERENCE=True,
+    FORCE_OPTIMIZED_INFERENCE=False,
 )
 class FasterGSRenderer(BaseRenderer):
     """Wrapper around the rasterization module from 3DGS."""
