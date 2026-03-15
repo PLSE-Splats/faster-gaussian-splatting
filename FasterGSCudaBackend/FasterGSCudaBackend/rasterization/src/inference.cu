@@ -60,7 +60,8 @@ void faster_gs::rasterization::inference(
           primitive_buffers.primitive_indices.Current(),
           primitive_buffers.n_touched_tiles, primitive_buffers.screen_bounds,
           primitive_buffers.mean2d, primitive_buffers.conic_opacity,
-          primitive_buffers.color, primitive_buffers.n_visible_primitives,
+          primitive_buffers.color_inference,
+          primitive_buffers.n_visible_primitives,
           primitive_buffers.n_instances, n_primitives, grid.x, grid.y,
           active_sh_bases, total_sh_bases, static_cast<float>(width),
           static_cast<float>(height), focal_x, focal_y, center_x, center_y,
@@ -154,7 +155,7 @@ void faster_gs::rasterization::rasterize(
   kernels::inference::blend_cu<<<grid, block>>>(
       tile_buffers.instance_ranges,
       instance_buffers.primitive_indices.Current(), primitive_buffers.mean2d,
-      primitive_buffers.conic_opacity, primitive_buffers.color, bg_color, image,
-      width, height, grid.x, to_chw);
+      primitive_buffers.conic_opacity, primitive_buffers.color_inference,
+      bg_color, image, width, height, grid.x, to_chw);
   CHECK_CUDA(config::debug, "blend")
 }

@@ -24,7 +24,7 @@ __global__ void preprocess_cu(
     ushort4* __restrict__ primitive_screen_bounds,
     float2* __restrict__ primitive_mean2d,
     float4* __restrict__ primitive_conic_opacity,
-    float3* __restrict__ primitive_color,
+    float4* __restrict__ primitive_color,
     uint* __restrict__ n_visible_primitives, uint* __restrict__ n_instances,
     const uint n_primitives, const uint grid_width, const uint grid_height,
     const uint active_sh_bases, const uint total_sh_bases, const float width,
@@ -198,7 +198,7 @@ __global__ void preprocess_cu(
   const float3 color = convert_sh_to_color(
       sh_coefficients_0, sh_coefficients_rest, mean3d, cam_position[0],
       primitive_idx, active_sh_bases, total_sh_bases);
-  primitive_color[primitive_idx] = fmaxf(color, 0.0f);
+  primitive_color[primitive_idx] = make_float4(fmaxf(color, 0.0f), 0.0f);
 
   const uint offset = atomicAdd(n_visible_primitives, 1);
   const uint depth_key = __float_as_uint(depth);
@@ -377,7 +377,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
              const uint* __restrict__ instance_primitive_indices,
              const float2* __restrict__ primitive_mean2d,
              const float4* __restrict__ primitive_conic_opacity,
-             const float3* __restrict__ primitive_color,
+             const float4* __restrict__ primitive_color,
              const float3* __restrict__ bg_color, float* __restrict__ image,
              const uint width, const uint height, const uint grid_width,
              const bool output_chw) {
@@ -395,7 +395,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
   // setup shared memory
   __shared__ float2 collected_mean2d[config::block_size_blend];
   __shared__ float4 collected_conic_opacity[config::block_size_blend];
-  __shared__ float3 collected_color[config::block_size_blend];
+  __shared__ float4 collected_color[config::block_size_blend];
   // initialize local storage
   float3 color_pixel = make_float3(0.0f);
   float transmittance = 1.0f;
@@ -437,7 +437,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
         continue;
 
       // blend fragment into pixel color
-      color_pixel += transmittance * alpha * collected_color[j];
+      color_pixel += transmittance * alpha * make_float3(collected_color[j]);
 
       // update transmittance
       transmittance *= 1.0f - alpha;

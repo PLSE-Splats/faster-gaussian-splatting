@@ -53,6 +53,7 @@ namespace faster_gs::rasterization {
         float2* mean2d;
         float4* conic_opacity;
         float3* color;
+        float4* color_inference;
         uint* n_visible_primitives;
         uint* n_instances;
 
@@ -74,6 +75,7 @@ namespace faster_gs::rasterization {
             obtain(blob, buffers.mean2d, n_primitives);
             obtain(blob, buffers.conic_opacity, n_primitives);
             obtain(blob, buffers.color, n_primitives);
+            obtain(blob, buffers.color_inference, n_primitives);
             cub::DeviceScan::ExclusiveSum(
                 nullptr, buffers.cub_workspace_size,
                 buffers.offset, buffers.offset,
