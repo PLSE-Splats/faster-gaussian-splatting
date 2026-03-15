@@ -38,6 +38,9 @@ namespace faster_gs::rasterization {
     void rasterize(
         std::function<char* (size_t)>& resize_instance_buffers,
         PrimitiveBuffers& primitive_buffers,
+        const float* primitive_color_r,
+        const float* primitive_color_g,
+        const float* primitive_color_b,
         TileBuffers& tile_buffers,
         const dim3& grid,
         const dim3& block,

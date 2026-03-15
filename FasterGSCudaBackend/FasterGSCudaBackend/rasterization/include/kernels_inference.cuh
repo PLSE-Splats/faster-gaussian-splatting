@@ -24,7 +24,8 @@ __global__ void preprocess_cu(
     ushort4* __restrict__ primitive_screen_bounds,
     float2* __restrict__ primitive_mean2d,
     float4* __restrict__ primitive_conic_opacity,
-    float3* __restrict__ primitive_color,
+    float* __restrict__ primitive_color_r, float* __restrict__ primitive_color_g,
+    float* __restrict__ primitive_color_b,
     uint* __restrict__ n_visible_primitives, uint* __restrict__ n_instances,
     const uint n_primitives, const uint grid_width, const uint grid_height,
     const uint active_sh_bases, const uint total_sh_bases, const float width,
@@ -195,10 +196,14 @@ __global__ void preprocess_cu(
                    static_cast<ushort>(screen_bounds.w));
   primitive_mean2d[primitive_idx] = mean2d;
   primitive_conic_opacity[primitive_idx] = make_float4(conic, opacity);
-  const float3 color = convert_sh_to_color(
-      sh_coefficients_0, sh_coefficients_rest, mean3d, cam_position[0],
-      primitive_idx, active_sh_bases, total_sh_bases);
-  primitive_color[primitive_idx] = fmaxf(color, 0.0f);
+  const float3 color = fmaxf(
+      convert_sh_to_color(sh_coefficients_0, sh_coefficients_rest, mean3d,
+                          cam_position[0], primitive_idx, active_sh_bases,
+                          total_sh_bases),
+      0.0f);
+  primitive_color_r[primitive_idx] = color.x;
+  primitive_color_g[primitive_idx] = color.y;
+  primitive_color_b[primitive_idx] = color.z;
 
   const uint offset = atomicAdd(n_visible_primitives, 1);
   const uint depth_key = __float_as_uint(depth);
@@ -377,7 +382,9 @@ __global__ void __launch_bounds__(config::block_size_blend)
              const uint* __restrict__ instance_primitive_indices,
              const float2* __restrict__ primitive_mean2d,
              const float4* __restrict__ primitive_conic_opacity,
-             const float3* __restrict__ primitive_color,
+             const float* __restrict__ primitive_color_r,
+             const float* __restrict__ primitive_color_g,
+             const float* __restrict__ primitive_color_b,
              const float3* __restrict__ bg_color, float* __restrict__ image,
              const uint width, const uint height, const uint grid_width,
              const bool output_chw) {
@@ -395,7 +402,9 @@ __global__ void __launch_bounds__(config::block_size_blend)
   // setup shared memory
   __shared__ float2 collected_mean2d[config::block_size_blend];
   __shared__ float4 collected_conic_opacity[config::block_size_blend];
-  __shared__ float3 collected_color[config::block_size_blend];
+  __shared__ float collected_color_r[config::block_size_blend];
+  __shared__ float collected_color_g[config::block_size_blend];
+  __shared__ float collected_color_b[config::block_size_blend];
   // initialize local storage
   float3 color_pixel = make_float3(0.0f);
   float transmittance = 1.0f;
@@ -413,7 +422,9 @@ __global__ void __launch_bounds__(config::block_size_blend)
       collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
       collected_conic_opacity[thread_rank] =
           primitive_conic_opacity[primitive_idx];
-      collected_color[thread_rank] = primitive_color[primitive_idx];
+      collected_color_r[thread_rank] = primitive_color_r[primitive_idx];
+      collected_color_g[thread_rank] = primitive_color_g[primitive_idx];
+      collected_color_b[thread_rank] = primitive_color_b[primitive_idx];
     }
     block.sync();
     const int current_batch_size =
@@ -437,7 +448,10 @@ __global__ void __launch_bounds__(config::block_size_blend)
         continue;
 
       // blend fragment into pixel color
-      color_pixel += transmittance * alpha * collected_color[j];
+      const float weight = transmittance * alpha;
+      color_pixel.x += weight * collected_color_r[j];
+      color_pixel.y += weight * collected_color_g[j];
+      color_pixel.z += weight * collected_color_b[j];
 
       // update transmittance
       transmittance *= 1.0f - alpha;

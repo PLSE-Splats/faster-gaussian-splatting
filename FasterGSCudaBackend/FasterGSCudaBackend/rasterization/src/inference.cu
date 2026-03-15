@@ -47,6 +47,11 @@ void faster_gs::rasterization::inference(
       resize_primitive_buffers(required<PrimitiveBuffers>(n_primitives));
   PrimitiveBuffers primitive_buffers =
       PrimitiveBuffers::from_blob(primitive_buffers_blob, n_primitives);
+  float* primitive_color_channels =
+      reinterpret_cast<float*>(primitive_buffers.color);
+  float* primitive_color_r = primitive_color_channels;
+  float* primitive_color_g = primitive_color_channels + n_primitives;
+  float* primitive_color_b = primitive_color_channels + 2 * n_primitives;
 
   cudaMemset(primitive_buffers.n_visible_primitives, 0, sizeof(uint));
   cudaMemset(primitive_buffers.n_instances, 0, sizeof(uint));
@@ -60,7 +65,8 @@ void faster_gs::rasterization::inference(
           primitive_buffers.primitive_indices.Current(),
           primitive_buffers.n_touched_tiles, primitive_buffers.screen_bounds,
           primitive_buffers.mean2d, primitive_buffers.conic_opacity,
-          primitive_buffers.color, primitive_buffers.n_visible_primitives,
+          primitive_color_r, primitive_color_g, primitive_color_b,
+          primitive_buffers.n_visible_primitives,
           primitive_buffers.n_instances, n_primitives, grid.x, grid.y,
           active_sh_bases, total_sh_bases, static_cast<float>(width),
           static_cast<float>(height), focal_x, focal_y, center_x, center_y,
@@ -100,7 +106,8 @@ void faster_gs::rasterization::inference(
 // template the remaining rasterization steps note that with c++20 one could use
 // a templated lambda to improve readability here
 #define RASTERIZE_ARGS                                                   \
-  resize_instance_buffers, primitive_buffers, tile_buffers, grid, block, \
+  resize_instance_buffers, primitive_buffers, primitive_color_r,          \
+      primitive_color_g, primitive_color_b, tile_buffers, grid, block,   \
       bg_color, image, memset_stream, n_visible_primitives, n_instances, \
       end_bit, width, height, to_chw
   if (end_bit <= 16)
@@ -113,8 +120,10 @@ void faster_gs::rasterization::inference(
 template <typename KeyT>
 void faster_gs::rasterization::rasterize(
     std::function<char*(size_t)>& resize_instance_buffers,
-    PrimitiveBuffers& primitive_buffers, TileBuffers& tile_buffers,
-    const dim3& grid, const dim3& block, const float3* bg_color, float* image,
+    PrimitiveBuffers& primitive_buffers, const float* primitive_color_r,
+    const float* primitive_color_g, const float* primitive_color_b,
+    TileBuffers& tile_buffers, const dim3& grid, const dim3& block,
+    const float3* bg_color, float* image,
     const cudaStream_t memset_stream, const int n_visible_primitives,
     const int n_instances, const int end_bit, const int width, const int height,
     const bool to_chw) {
@@ -154,7 +163,8 @@ void faster_gs::rasterization::rasterize(
   kernels::inference::blend_cu<<<grid, block>>>(
       tile_buffers.instance_ranges,
       instance_buffers.primitive_indices.Current(), primitive_buffers.mean2d,
-      primitive_buffers.conic_opacity, primitive_buffers.color, bg_color, image,
+      primitive_buffers.conic_opacity, primitive_color_r, primitive_color_g,
+      primitive_color_b, bg_color, image,
       width, height, grid.x, to_chw);
   CHECK_CUDA(config::debug, "blend")
 }
