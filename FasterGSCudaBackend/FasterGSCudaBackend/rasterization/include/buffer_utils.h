@@ -123,6 +123,30 @@ namespace faster_gs::rasterization {
         }
     };
 
+    template <typename KeyT>
+    struct InferenceInstanceBuffers {
+        size_t cub_workspace_size;
+        char* cub_workspace;
+        cub::DoubleBuffer<KeyT> keys;
+        cub::DoubleBuffer<uint> primitive_indices;
+        float2* mean2d;
+        float4* conic_opacity;
+        float3* color;
+
+        static InferenceInstanceBuffers from_blob(char*& blob, int n_instances, int end_bit) {
+            InferenceInstanceBuffers buffers;
+            InstanceBuffers<KeyT> base_buffers = InstanceBuffers<KeyT>::from_blob(blob, n_instances, end_bit);
+            buffers.cub_workspace_size = base_buffers.cub_workspace_size;
+            buffers.cub_workspace = base_buffers.cub_workspace;
+            buffers.keys = base_buffers.keys;
+            buffers.primitive_indices = base_buffers.primitive_indices;
+            obtain(blob, buffers.mean2d, n_instances);
+            obtain(blob, buffers.conic_opacity, n_instances);
+            obtain(blob, buffers.color, n_instances);
+            return buffers;
+        }
+    };
+
     struct TileBuffers {
         size_t cub_workspace_size;
         char* cub_workspace;

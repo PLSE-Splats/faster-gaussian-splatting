@@ -119,9 +119,10 @@ void faster_gs::rasterization::rasterize(
     const int n_instances, const int end_bit, const int width, const int height,
     const bool to_chw) {
   char* instance_buffers_blob = resize_instance_buffers(
-      required<InstanceBuffers<KeyT>>(n_instances, end_bit));
-  InstanceBuffers<KeyT> instance_buffers = InstanceBuffers<KeyT>::from_blob(
-      instance_buffers_blob, n_instances, end_bit);
+      required<InferenceInstanceBuffers<KeyT>>(n_instances, end_bit));
+  InferenceInstanceBuffers<KeyT> instance_buffers =
+      InferenceInstanceBuffers<KeyT>::from_blob(instance_buffers_blob,
+                                                n_instances, end_bit);
 
   kernels::inference::create_instances_cu<KeyT><<<
       div_round_up(n_visible_primitives, config::block_size_create_instances),
@@ -149,12 +150,20 @@ void faster_gs::rasterization::rasterize(
             instance_buffers.keys.Current(), tile_buffers.instance_ranges,
             n_instances);
     CHECK_CUDA(config::debug, "extract_instance_ranges")
+
+    kernels::inference::stage_instance_data_cu<<<
+        div_round_up(n_instances, config::block_size_extract_instance_ranges),
+        config::block_size_extract_instance_ranges>>>(
+        instance_buffers.primitive_indices.Current(), primitive_buffers.mean2d,
+        primitive_buffers.conic_opacity, primitive_buffers.color,
+        instance_buffers.mean2d, instance_buffers.conic_opacity,
+        instance_buffers.color, n_instances);
+    CHECK_CUDA(config::debug, "stage_instance_data")
   }
 
   kernels::inference::blend_cu<<<grid, block>>>(
-      tile_buffers.instance_ranges,
-      instance_buffers.primitive_indices.Current(), primitive_buffers.mean2d,
-      primitive_buffers.conic_opacity, primitive_buffers.color, bg_color, image,
+      tile_buffers.instance_ranges, instance_buffers.mean2d,
+      instance_buffers.conic_opacity, instance_buffers.color, bg_color, image,
       width, height, grid.x, to_chw);
   CHECK_CUDA(config::debug, "blend")
 }
