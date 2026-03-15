@@ -131,7 +131,7 @@ namespace faster_gs::rasterization {
         cub::DoubleBuffer<uint> primitive_indices;
         float2* mean2d;
         float4* conic_opacity;
-        float3* color;
+        float4* color;
 
         static InferenceInstanceBuffers from_blob(char*& blob, int n_instances, int end_bit) {
             InferenceInstanceBuffers buffers;

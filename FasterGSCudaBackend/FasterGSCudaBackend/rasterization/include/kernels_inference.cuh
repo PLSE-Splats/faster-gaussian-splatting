@@ -379,20 +379,20 @@ __global__ void stage_instance_data_cu(
     const float3* __restrict__ primitive_color,
     float2* __restrict__ instance_mean2d,
     float4* __restrict__ instance_conic_opacity,
-    float3* __restrict__ instance_color, const uint n_instances) {
+    float4* __restrict__ instance_color, const uint n_instances) {
   const uint instance_idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (instance_idx >= n_instances) return;
   const uint primitive_idx = instance_primitive_indices[instance_idx];
   instance_mean2d[instance_idx] = primitive_mean2d[primitive_idx];
   instance_conic_opacity[instance_idx] = primitive_conic_opacity[primitive_idx];
-  instance_color[instance_idx] = primitive_color[primitive_idx];
+  instance_color[instance_idx] = make_float4(primitive_color[primitive_idx]);
 }
 
 __global__ void __launch_bounds__(config::block_size_blend)
     blend_cu(const uint2* __restrict__ tile_instance_ranges,
              const float2* __restrict__ instance_mean2d,
              const float4* __restrict__ instance_conic_opacity,
-             const float3* __restrict__ instance_color,
+             const float4* __restrict__ instance_color,
              const float3* __restrict__ bg_color, float* __restrict__ image,
              const uint width, const uint height, const uint grid_width,
              const bool output_chw) {
@@ -410,7 +410,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
   // setup shared memory
   __shared__ float2 collected_mean2d[config::block_size_blend];
   __shared__ float4 collected_conic_opacity[config::block_size_blend];
-  __shared__ float3 collected_color[config::block_size_blend];
+  __shared__ float4 collected_color[config::block_size_blend];
   // initialize local storage
   float3 color_pixel = make_float3(0.0f);
   float transmittance = 1.0f;
@@ -451,7 +451,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
         continue;
 
       // blend fragment into pixel color
-      color_pixel += transmittance * alpha * collected_color[j];
+      color_pixel += transmittance * alpha * make_float3(collected_color[j]);
 
       // update transmittance
       transmittance *= 1.0f - alpha;
