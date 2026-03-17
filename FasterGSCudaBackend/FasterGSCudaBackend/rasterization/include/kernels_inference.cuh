@@ -381,13 +381,24 @@ __global__ void __launch_bounds__(config::block_size_blend)
              const float3* __restrict__ bg_color, float* __restrict__ image,
              const uint width, const uint height, const uint grid_width,
              const bool output_chw) {
+  constexpr uint warp_size = 32;
+  constexpr uint warp_tile_width = 8;
+  constexpr uint warp_tile_height = 4;
   auto block = cg::this_thread_block();
+  auto warp = cg::tiled_partition<warp_size>(block);
   const dim3 group_index = block.group_index();
-  const dim3 thread_index = block.thread_index();
-  const uint thread_rank = block.thread_rank();
-  const uint2 pixel_coords =
-      make_uint2(group_index.x * config::tile_width + thread_index.x,
-                 group_index.y * config::tile_height + thread_index.y);
+  const uint lane_idx = warp.thread_rank();
+  const uint warp_idx = warp.meta_group_rank();
+  const uint warp_start = warp_idx * warp_size;
+  const uint subtiles_per_row = config::tile_width / warp_tile_width;
+  const uint subtile_x = warp_idx % subtiles_per_row;
+  const uint subtile_y = warp_idx / subtiles_per_row;
+  const uint tile_origin_x = group_index.x * config::tile_width;
+  const uint tile_origin_y = group_index.y * config::tile_height;
+  const uint subtile_origin_x = tile_origin_x + subtile_x * warp_tile_width;
+  const uint subtile_origin_y = tile_origin_y + subtile_y * warp_tile_height;
+  const uint2 pixel_coords = make_uint2(subtile_origin_x + lane_idx % warp_tile_width,
+                                        subtile_origin_y + lane_idx / warp_tile_width);
   const bool inside = pixel_coords.x < width && pixel_coords.y < height;
   const float2 pixel = make_float2(__uint2float_rn(pixel_coords.x),
                                    __uint2float_rn(pixel_coords.y)) +
@@ -403,27 +414,78 @@ __global__ void __launch_bounds__(config::block_size_blend)
   // collaborative loading and processing
   const uint2 tile_range =
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
-  for (int n_points_remaining = tile_range.y - tile_range.x,
-           current_fetch_idx = tile_range.x + thread_rank;
-       n_points_remaining > 0; n_points_remaining -= config::block_size_blend,
-           current_fetch_idx += config::block_size_blend) {
-    if (__syncthreads_count(done) == config::block_size_blend) break;
-    if (current_fetch_idx < tile_range.y) {
+  for (uint current_fetch_idx = tile_range.x + warp_start + lane_idx;
+       current_fetch_idx < tile_range.y; current_fetch_idx += config::block_size_blend) {
+    if (warp.ballot(done) == 0xffffffffu) break;
+    const bool valid = current_fetch_idx < tile_range.y;
+    if (valid) {
       const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
-      collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
-      collected_conic_opacity[thread_rank] =
+      const uint write_idx = warp_start + lane_idx;
+      collected_mean2d[write_idx] = primitive_mean2d[primitive_idx];
+      collected_conic_opacity[write_idx] =
           primitive_conic_opacity[primitive_idx];
-      collected_color[thread_rank] = primitive_color[primitive_idx];
+      collected_color[write_idx] = primitive_color[primitive_idx];
     }
-    block.sync();
-    const int current_batch_size =
-        min(config::block_size_blend, n_points_remaining);
-    for (int j = 0; !done && j < current_batch_size; ++j) {
+    warp.sync();
+    const uint current_batch_start = current_fetch_idx - lane_idx;
+    const uint n_points_remaining = tile_range.y - current_batch_start;
+    const uint current_batch_size = min(static_cast<uint>(warp_size), n_points_remaining);
+    const float4 conic_opacity_subtile =
+        valid ? collected_conic_opacity[warp_start + lane_idx] : make_float4(0.0f);
+    const float3 conic_subtile = make_float3(conic_opacity_subtile);
+    const float opacity_subtile = conic_opacity_subtile.w;
+    const float power_threshold_subtile = valid
+                                              ? (config::original_opacity_interpretation
+                                                     ? logf(opacity_subtile * config::min_alpha_threshold_rcp)
+                                                     : config::max_power_threshold)
+                                              : 0.0f;
+    const float2 mean_shifted_subtile =
+        valid ? collected_mean2d[warp_start + lane_idx] - 0.5f : make_float2(0.0f);
+    const float2 rect_min_subtile = make_float2(static_cast<float>(subtile_origin_x),
+                                                static_cast<float>(subtile_origin_y));
+    const float2 rect_max_subtile =
+        make_float2(static_cast<float>(subtile_origin_x + warp_tile_width - 1),
+                    static_cast<float>(subtile_origin_y + warp_tile_height - 1));
+    const float x_min_diff_subtile = rect_min_subtile.x - mean_shifted_subtile.x;
+    const float x_left_subtile = static_cast<float>(x_min_diff_subtile > 0.0f);
+    const float not_in_x_range_subtile =
+        x_left_subtile + static_cast<float>(mean_shifted_subtile.x > rect_max_subtile.x);
+    const float y_min_diff_subtile = rect_min_subtile.y - mean_shifted_subtile.y;
+    const float y_above_subtile = static_cast<float>(y_min_diff_subtile > 0.0f);
+    const float not_in_y_range_subtile =
+        y_above_subtile + static_cast<float>(mean_shifted_subtile.y > rect_max_subtile.y);
+    bool subtile_hit = valid;
+    if (subtile_hit && not_in_y_range_subtile + not_in_x_range_subtile != 0.0f) {
+      const float2 closest_corner = make_float2(
+          lerp(rect_max_subtile.x, rect_min_subtile.x, x_left_subtile),
+          lerp(rect_max_subtile.y, rect_min_subtile.y, y_above_subtile));
+      const float2 diff = mean_shifted_subtile - closest_corner;
+      const float2 d = make_float2(
+          copysignf(static_cast<float>(warp_tile_width - 1), x_min_diff_subtile),
+          copysignf(static_cast<float>(warp_tile_height - 1), y_min_diff_subtile));
+      const float2 t = make_float2(
+          not_in_y_range_subtile *
+              __saturatef((d.x * conic_subtile.x * diff.x + d.x * conic_subtile.y * diff.y) /
+                          (d.x * conic_subtile.x * d.x)),
+          not_in_x_range_subtile *
+              __saturatef((d.y * conic_subtile.y * diff.x + d.y * conic_subtile.z * diff.y) /
+                          (d.y * conic_subtile.z * d.y)));
+      const float2 max_contribution_point = closest_corner + t * d;
+      const float2 delta = mean_shifted_subtile - max_contribution_point;
+      const float max_power_in_subtile =
+          0.5f * (conic_subtile.x * delta.x * delta.x +
+                  conic_subtile.z * delta.y * delta.y) +
+          conic_subtile.y * delta.x * delta.y;
+      subtile_hit = max_power_in_subtile <= power_threshold_subtile;
+    }
+    const uint subtile_hit_mask = warp.ballot(subtile_hit);
+    for (uint j = 0; !done && j < current_batch_size; ++j) {
+      if ((subtile_hit_mask & (1u << j)) == 0) continue;
       // evaluate current Gaussian at pixel
-      const float4 conic_opacity = collected_conic_opacity[j];
+      const float4 conic_opacity = collected_conic_opacity[warp_start + j];
       const float3 conic = make_float3(conic_opacity);
       const float opacity = conic_opacity.w;
-      const float2 delta = collected_mean2d[j] - pixel;
+      const float2 delta = collected_mean2d[warp_start + j] - pixel;
       const float exponent =
           -0.5f * (conic.x * delta.x * delta.x + conic.z * delta.y * delta.y) -
           conic.y * delta.x * delta.y;
@@ -437,7 +499,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
         continue;
 
       // blend fragment into pixel color
-      color_pixel += transmittance * alpha * collected_color[j];
+      color_pixel += transmittance * alpha * collected_color[warp_start + j];
 
       // update transmittance
       transmittance *= 1.0f - alpha;
