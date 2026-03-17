@@ -149,30 +149,20 @@ __global__ void preprocess_cu(
   const float cutoff_factor = 2.0f * power_threshold;
   const float extent_x = fmaxf(sqrtf(cov2d.x * cutoff_factor) - 0.5f, 0.0f);
   const float extent_y = fmaxf(sqrtf(cov2d.z * cutoff_factor) - 0.5f, 0.0f);
-  const uint4 screen_bounds = make_uint4(
-      min(grid_width,
-          static_cast<uint>(
-              max(0, __float2int_rd(
-                         (mean2d.x - extent_x) /
-                         static_cast<float>(config::tile_width))))),  // x_min
-      min(grid_width,
-          static_cast<uint>(
-              max(0, __float2int_ru(
-                         (mean2d.x + extent_x) /
-                         static_cast<float>(config::tile_width))))),  // x_max
-      min(grid_height,
-          static_cast<uint>(
-              max(0, __float2int_rd(
-                         (mean2d.y - extent_y) /
-                         static_cast<float>(config::tile_height))))),  // y_min
-      min(grid_height,
-          static_cast<uint>(
-              max(0, __float2int_ru(
-                         (mean2d.y + extent_y) /
-                         static_cast<float>(config::tile_height)))))  // y_max
+  const ushort4 screen_bounds = make_ushort4(
+      min(grid_width, max(0, __float2int_rd(mean2d.x - extent_x))),   // x_min
+      min(grid_width, max(0, __float2int_ru(mean2d.x + extent_x))),   // x_max
+      min(grid_height, max(0, __float2int_rd(mean2d.y - extent_y))),  // y_min
+      min(grid_height, max(0, __float2int_ru(mean2d.y + extent_y)))   // y_max
   );
+  const uint4 tile_bounds = make_uint4(
+      screen_bounds.x / config::tile_width,
+      __float2int_ru(static_cast<float>(screen_bounds.y) / config::tile_width),
+      screen_bounds.z / config::tile_height,
+      __float2int_ru(static_cast<float>(screen_bounds.w) /
+                     config::tile_height));
   const uint n_touched_tiles_max =
-      (screen_bounds.y - screen_bounds.x) * (screen_bounds.w - screen_bounds.z);
+      (tile_bounds.y - tile_bounds.x) * (tile_bounds.w - tile_bounds.z);
   if (n_touched_tiles_max == 0) active = false;
 
   // early exit if whole warp is inactive
@@ -180,19 +170,14 @@ __global__ void preprocess_cu(
 
   // compute exact number of tiles the primitive overlaps
   const uint n_touched_tiles = compute_exact_n_touched_tiles(
-      mean2d, conic, screen_bounds, power_threshold, n_touched_tiles_max,
-      active);
+      mean2d, conic, tile_bounds, power_threshold, n_touched_tiles_max, active);
 
   // cooperative threads no longer needed
   if (n_touched_tiles == 0 || !active) return;
 
   // store results
   primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
-  primitive_screen_bounds[primitive_idx] =
-      make_ushort4(static_cast<ushort>(screen_bounds.x),
-                   static_cast<ushort>(screen_bounds.y),
-                   static_cast<ushort>(screen_bounds.z),
-                   static_cast<ushort>(screen_bounds.w));
+  primitive_screen_bounds[primitive_idx] = screen_bounds;
   primitive_mean2d[primitive_idx] = mean2d;
   primitive_conic_opacity[primitive_idx] = make_float4(conic, opacity);
   const float3 color = convert_sh_to_color(
@@ -251,11 +236,15 @@ __global__ void create_instances_cu(
   const uint primitive_idx = primitive_indices_sorted[original_idx];
 
   const ushort4 screen_bounds = primitive_screen_bounds[primitive_idx];
-  const uint screen_bounds_width =
-      static_cast<uint>(screen_bounds.y - screen_bounds.x);
+  const ushort4 tile_bounds = make_ushort4(
+      screen_bounds.x / config::tile_width,
+      __float2int_ru(static_cast<float>(screen_bounds.y) / config::tile_width),
+      screen_bounds.z / config::tile_height,
+      __float2int_ru(static_cast<float>(screen_bounds.w) /
+                     config::tile_height));
+  const uint tile_bounds_width = tile_bounds.y - tile_bounds.x;
   const uint instance_count =
-      static_cast<uint>(screen_bounds.w - screen_bounds.z) *
-      screen_bounds_width;
+      (tile_bounds.w - tile_bounds.z) * tile_bounds_width;
   const float2 mean2d = primitive_mean2d[primitive_idx];
   const float2 mean2d_shifted = mean2d - 0.5f;
   const float4 conic_opacity = primitive_conic_opacity[primitive_idx];
@@ -271,8 +260,8 @@ __global__ void create_instances_cu(
   for (uint instance_idx = 0; active && instance_idx < instance_count &&
                               instance_idx < config::n_sequential_threshold;
        instance_idx++) {
-    const uint tile_x = screen_bounds.x + (instance_idx % screen_bounds_width);
-    const uint tile_y = screen_bounds.z + (instance_idx / screen_bounds_width);
+    const uint tile_x = tile_bounds.x + (instance_idx % tile_bounds_width);
+    const uint tile_y = tile_bounds.z + (instance_idx / tile_bounds_width);
     if (will_primitive_contribute(mean2d_shifted, conic, tile_x, tile_y,
                                   power_threshold)) {
       const uint tile_idx = tile_y * grid_width + tile_x;
@@ -289,12 +278,12 @@ __global__ void create_instances_cu(
   if (remaining_threads == 0) return;
 
   __shared__ ushort4
-      collected_screen_bounds[config::block_size_create_instances];
+      collected_tile_bounds[config::block_size_create_instances];
   __shared__ float2
       collected_mean2d_shifted[config::block_size_create_instances];
   __shared__ float4
       collected_conic_power_threshold[config::block_size_create_instances];
-  collected_screen_bounds[thread_rank] = screen_bounds;
+  collected_tile_bounds[thread_rank] = tile_bounds;
   collected_mean2d_shifted[thread_rank] = mean2d_shifted;
   collected_conic_power_threshold[thread_rank] =
       make_float4(conic, power_threshold);
@@ -307,18 +296,18 @@ __global__ void create_instances_cu(
         warp.shfl(current_write_offset, current_lane);
 
     const uint read_offset_shared = warp_start + current_lane;
-    const ushort4 screen_bounds_coop =
-        collected_screen_bounds[read_offset_shared];
+    const ushort4 tile_bounds_coop =
+        collected_tile_bounds[read_offset_shared];
     const float2 mean2d_shifted_coop =
         collected_mean2d_shifted[read_offset_shared];
     const float4 conic_power_threshold_coop =
         collected_conic_power_threshold[read_offset_shared];
 
-    const uint screen_bounds_width_coop =
-        static_cast<uint>(screen_bounds_coop.y - screen_bounds_coop.x);
+    const uint tile_bounds_width_coop =
+        static_cast<uint>(tile_bounds_coop.y - tile_bounds_coop.x);
     const uint instance_count_coop =
-        screen_bounds_width_coop *
-        static_cast<uint>(screen_bounds_coop.w - screen_bounds_coop.z);
+        tile_bounds_width_coop *
+        static_cast<uint>(tile_bounds_coop.w - tile_bounds_coop.z);
     const float3 conic_coop = make_float3(conic_power_threshold_coop);
     const float power_threshold_coop = conic_power_threshold_coop.w;
 
@@ -329,9 +318,9 @@ __global__ void create_instances_cu(
       const uint instance_idx =
           i * warp_size + lane_idx + config::n_sequential_threshold;
       const uint tile_x =
-          screen_bounds_coop.x + (instance_idx % screen_bounds_width_coop);
+          tile_bounds_coop.x + (instance_idx % tile_bounds_width_coop);
       const uint tile_y =
-          screen_bounds_coop.z + (instance_idx / screen_bounds_width_coop);
+          tile_bounds_coop.z + (instance_idx / tile_bounds_width_coop);
       const bool write =
           instance_idx < instance_count_coop &&
           will_primitive_contribute(mean2d_shifted_coop, conic_coop, tile_x,
@@ -386,6 +375,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
   const auto group_index = block.group_index();
   const auto tile_origin_x = group_index.x * config::tile_width;
   const auto tile_origin_y = group_index.y * config::tile_height;
+  const uint thread_rank = block.thread_rank();
 
   // Create warp info.
   const auto warp = cg::tiled_partition<config::warp_size>(block);
@@ -399,8 +389,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
   const auto subtile_origin_y =
       tile_origin_y + subtile_y * config::warp_tile_height;
 
-  const dim3 thread_index = block.thread_index();
-  const uint thread_rank = block.thread_rank();
+  // Compute pixel coordinates.
   const uint2 pixel_coords =
       make_uint2(subtile_origin_x + lane_index % config::warp_tile_width,
                  subtile_origin_y + lane_index / config::warp_tile_width);
@@ -408,15 +397,18 @@ __global__ void __launch_bounds__(config::block_size_blend)
   const float2 pixel = make_float2(__uint2float_rn(pixel_coords.x),
                                    __uint2float_rn(pixel_coords.y)) +
                        0.5f;
-  // setup shared memory
+
+  // Setup shared memory.
   __shared__ float2 collected_mean2d[config::warp_cull_fetch_size];
   __shared__ float4 collected_conic_opacity[config::warp_cull_fetch_size];
   __shared__ float3 collected_color[config::warp_cull_fetch_size];
-  // initialize local storage
+
+  // Initialize local storage.
   float3 color_pixel = make_float3(0.0f);
   float transmittance = 1.0f;
   bool done = !inside;
-  // collaborative loading and processing
+
+  // Collaborative loading and processing.
   const uint2 tile_range =
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
   for (int n_points_remaining = tile_range.y - tile_range.x,
@@ -430,11 +422,14 @@ __global__ void __launch_bounds__(config::block_size_blend)
     // Fetch next batch into shared memory if thread is within fetch bounds.
     if (current_fetch_idx < tile_range.y &&
         thread_rank < config::warp_cull_fetch_size) {
+      // Fetch.
       const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
       collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
       collected_conic_opacity[thread_rank] =
           primitive_conic_opacity[primitive_idx];
       collected_color[thread_rank] = primitive_color[primitive_idx];
+
+      // Compute bounds.
     }
     block.sync();
     const int current_batch_size =
