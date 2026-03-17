@@ -414,9 +414,11 @@ __global__ void __launch_bounds__(config::block_size_blend)
   // collaborative loading and processing
   const uint2 tile_range =
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
-  for (uint current_fetch_idx = tile_range.x + warp_start + lane_idx;
-       current_fetch_idx < tile_range.y; current_fetch_idx += config::block_size_blend) {
+  for (uint current_batch_start = tile_range.x + warp_start;
+       current_batch_start < tile_range.y;
+       current_batch_start += config::block_size_blend) {
     if (warp.all(done)) break;
+    const uint current_fetch_idx = current_batch_start + lane_idx;
     const bool valid = current_fetch_idx < tile_range.y;
     if (valid) {
       const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
@@ -427,7 +429,6 @@ __global__ void __launch_bounds__(config::block_size_blend)
       collected_color[write_idx] = primitive_color[primitive_idx];
     }
     warp.sync();
-    const uint current_batch_start = current_fetch_idx - lane_idx;
     const uint n_points_remaining = tile_range.y - current_batch_start;
     const uint current_batch_size = min(static_cast<uint>(warp_size), n_points_remaining);
     const float4 conic_opacity_subtile =
