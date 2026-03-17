@@ -416,7 +416,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
   for (uint current_fetch_idx = tile_range.x + warp_start + lane_idx;
        current_fetch_idx < tile_range.y; current_fetch_idx += config::block_size_blend) {
-    if (warp.ballot(done) == 0xffffffffu) break;
+    if (warp.all(done)) break;
     const bool valid = current_fetch_idx < tile_range.y;
     if (valid) {
       const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
@@ -440,7 +440,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
                                                      : config::max_power_threshold)
                                               : 0.0f;
     const float2 mean_shifted_subtile =
-        valid ? collected_mean2d[warp_start + lane_idx] - 0.5f : make_float2(0.0f);
+        valid ? collected_mean2d[warp_start + lane_idx] - make_float2(0.5f) : make_float2(0.0f);
     const float2 rect_min_subtile = make_float2(static_cast<float>(subtile_origin_x),
                                                 static_cast<float>(subtile_origin_y));
     const float2 rect_max_subtile =
