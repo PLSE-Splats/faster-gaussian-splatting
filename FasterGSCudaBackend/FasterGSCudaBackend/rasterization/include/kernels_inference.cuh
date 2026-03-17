@@ -381,21 +381,37 @@ __global__ void __launch_bounds__(config::block_size_blend)
              const float3* __restrict__ bg_color, float* __restrict__ image,
              const uint width, const uint height, const uint grid_width,
              const bool output_chw) {
-  auto block = cg::this_thread_block();
-  const dim3 group_index = block.group_index();
+  // Get tile info.
+  const auto block = cg::this_thread_block();
+  const auto group_index = block.group_index();
+  const auto tile_origin_x = group_index.x * config::tile_width;
+  const auto tile_origin_y = group_index.y * config::tile_height;
+
+  // Create warp info.
+  const auto warp = cg::tiled_partition<config::warp_size>(block);
+  const auto lane_index = warp.thread_rank();
+  const auto warp_index = warp.meta_group_rank();
+  const auto warp_block_start_index = warp_index * config::warp_size;
+  const auto subtile_x = warp_index % config::subtile_per_row;
+  const auto subtile_y = warp_index / config::subtile_per_row;
+  const auto subtile_origin_x =
+      tile_origin_x + subtile_x * config::warp_tile_width;
+  const auto subtile_origin_y =
+      tile_origin_y + subtile_y * config::warp_tile_height;
+
   const dim3 thread_index = block.thread_index();
   const uint thread_rank = block.thread_rank();
   const uint2 pixel_coords =
-      make_uint2(group_index.x * config::tile_width + thread_index.x,
-                 group_index.y * config::tile_height + thread_index.y);
+      make_uint2(subtile_origin_x + lane_index % config::warp_tile_width,
+                 subtile_origin_y + lane_index / config::warp_tile_width);
   const bool inside = pixel_coords.x < width && pixel_coords.y < height;
   const float2 pixel = make_float2(__uint2float_rn(pixel_coords.x),
                                    __uint2float_rn(pixel_coords.y)) +
                        0.5f;
   // setup shared memory
-  __shared__ float2 collected_mean2d[config::block_size_blend];
-  __shared__ float4 collected_conic_opacity[config::block_size_blend];
-  __shared__ float3 collected_color[config::block_size_blend];
+  __shared__ float2 collected_mean2d[config::warp_cull_fetch_size];
+  __shared__ float4 collected_conic_opacity[config::warp_cull_fetch_size];
+  __shared__ float3 collected_color[config::warp_cull_fetch_size];
   // initialize local storage
   float3 color_pixel = make_float3(0.0f);
   float transmittance = 1.0f;
@@ -405,10 +421,15 @@ __global__ void __launch_bounds__(config::block_size_blend)
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
   for (int n_points_remaining = tile_range.y - tile_range.x,
            current_fetch_idx = tile_range.x + thread_rank;
-       n_points_remaining > 0; n_points_remaining -= config::block_size_blend,
-           current_fetch_idx += config::block_size_blend) {
-    if (__syncthreads_count(done) == config::block_size_blend) break;
-    if (current_fetch_idx < tile_range.y) {
+       n_points_remaining > 0;
+       n_points_remaining -= config::warp_cull_fetch_size,
+           current_fetch_idx += config::warp_cull_fetch_size) {
+    // Exit if all threads are done.
+    if (__syncthreads_and(done)) break;
+
+    // Fetch next batch into shared memory if thread is within fetch bounds.
+    if (current_fetch_idx < tile_range.y &&
+        thread_rank < config::warp_cull_fetch_size) {
       const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
       collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
       collected_conic_opacity[thread_rank] =
