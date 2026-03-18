@@ -371,8 +371,8 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
              const float4* __restrict__ primitive_conic_opacity,
              const float3* __restrict__ primitive_color,
              const float3* __restrict__ bg_color, float* __restrict__ image,
-             const uint width, const uint height, const uint grid_width,
-             const bool output_chw) {
+             uint* __restrict__ subtile_hit_counts, const uint width,
+             const uint height, const uint grid_width, const bool output_chw) {
   // Get tile info.
   const auto block = cg::this_thread_block();
   const auto group_index = block.group_index();
@@ -414,6 +414,7 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
   float3 color_pixel = make_float3(0.0f);
   float transmittance = 1.0f;
   bool done = !inside;
+  uint warp_subtile_hit_count = 0;
 
   // Collaborative loading and processing.
   const auto [tile_x, tile_y] =
@@ -450,6 +451,7 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
                     splat_top < subtile_bottom && subtile_top < splat_bottom;
     }
     const uint subtile_hit_ballot = warp.ballot(subtile_hit);
+    warp_subtile_hit_count += __popc(subtile_hit_ballot);
 
     // Work through this batch.
     for (int j = 0; !done && j < current_batch_size; ++j) {
@@ -482,6 +484,12 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
         done = true;
       }
     }
+  }
+  if (lane_index == 0) {
+    constexpr uint n_subtiles_per_tile = config::block_size_blend / config::warp_size;
+    const uint tile_idx = group_index.y * grid_width + group_index.x;
+    subtile_hit_counts[tile_idx * n_subtiles_per_tile + warp_index] =
+        warp_subtile_hit_count;
   }
   if (inside) {
     // apply background color

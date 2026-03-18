@@ -1,5 +1,9 @@
 #include <cub/cub.cuh>
+#include <fstream>
 #include <functional>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "buffer_utils.h"
 #include "helper_math.h"
@@ -118,6 +122,13 @@ void faster_gs::rasterization::rasterize(
     const cudaStream_t memset_stream, const int n_visible_primitives,
     const int n_instances, const int end_bit, const int width, const int height,
     const bool to_chw) {
+  constexpr uint n_subtiles_per_tile = 8;
+  static_assert(config::block_size_blend / config::warp_size == n_subtiles_per_tile,
+                "Expected 8 warp subtiles per tile.");
+  const size_t n_subtile_hits =
+      static_cast<size_t>(n_subtiles_per_tile) * static_cast<size_t>(grid.x) *
+      static_cast<size_t>(grid.y);
+
   char* instance_buffers_blob = resize_instance_buffers(
       required<InstanceBuffers<KeyT>>(n_instances, end_bit));
   InstanceBuffers<KeyT> instance_buffers = InstanceBuffers<KeyT>::from_blob(
@@ -151,10 +162,38 @@ void faster_gs::rasterization::rasterize(
     CHECK_CUDA(config::debug, "extract_instance_ranges")
   }
 
+  uint* subtile_hit_counts_device = nullptr;
+  cudaMalloc(&subtile_hit_counts_device, n_subtile_hits * sizeof(uint));
+  CHECK_CUDA(config::debug, "cudaMalloc (subtile_hit_counts_device)")
+  cudaMemset(subtile_hit_counts_device, 0, n_subtile_hits * sizeof(uint));
+  CHECK_CUDA(config::debug, "cudaMemset (subtile_hit_counts_device)")
+
   kernels::inference::blend_cu<<<grid, block>>>(
       tile_buffers.instance_ranges,
       instance_buffers.primitive_indices.Current(), primitive_buffers.mean2d,
       primitive_buffers.screen_bounds, primitive_buffers.conic_opacity,
-      primitive_buffers.color, bg_color, image, width, height, grid.x, to_chw);
+      primitive_buffers.color, bg_color, image, subtile_hit_counts_device, width,
+      height, grid.x, to_chw);
   CHECK_CUDA(config::debug, "blend")
+
+  std::vector<uint> subtile_hit_counts_host(n_subtile_hits);
+  cudaMemcpy(subtile_hit_counts_host.data(), subtile_hit_counts_device,
+             n_subtile_hits * sizeof(uint), cudaMemcpyDeviceToHost);
+  CHECK_CUDA(config::debug, "cudaMemcpy (subtile_hit_counts_host)")
+  cudaFree(subtile_hit_counts_device);
+  CHECK_CUDA(config::debug, "cudaFree (subtile_hit_counts_device)")
+
+  std::string subtile_hits_csv_batch;
+  subtile_hits_csv_batch.reserve(n_subtile_hits * 6);
+  for (uint hit_counts_host : subtile_hit_counts_host) {
+    subtile_hits_csv_batch += std::to_string(hit_counts_host);
+    subtile_hits_csv_batch += "\n";
+  }
+
+  std::ofstream subtile_hits_file("subtile_hits.csv", std::ios::out | std::ios::app);
+  if (!subtile_hits_file.is_open())
+    throw std::runtime_error("Failed to open subtile_hits.csv for appending.");
+  subtile_hits_file << subtile_hits_csv_batch;
+  if (!subtile_hits_file.good())
+    throw std::runtime_error("Failed to append subtile hit counts to subtile_hits.csv.");
 }
