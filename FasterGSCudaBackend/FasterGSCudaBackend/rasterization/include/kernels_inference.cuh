@@ -149,12 +149,16 @@ __global__ void preprocess_cu(
   const float cutoff_factor = 2.0f * power_threshold;
   const float extent_x = fmaxf(sqrtf(cov2d.x * cutoff_factor) - 0.5f, 0.0f);
   const float extent_y = fmaxf(sqrtf(cov2d.z * cutoff_factor) - 0.5f, 0.0f);
-  const ushort4 screen_bounds = make_ushort4(
-      min(grid_width, max(0, __float2int_rd(mean2d.x - extent_x))),   // x_min
-      min(grid_width, max(0, __float2int_ru(mean2d.x + extent_x))),   // x_max
-      min(grid_height, max(0, __float2int_rd(mean2d.y - extent_y))),  // y_min
-      min(grid_height, max(0, __float2int_ru(mean2d.y + extent_y)))   // y_max
-  );
+  const ushort4 screen_bounds =
+      make_ushort4(min(static_cast<ushort>(width),
+                       max(0, __float2int_rd(mean2d.x - extent_x))),  // x_min
+                   min(static_cast<ushort>(width),
+                       max(0, __float2int_ru(mean2d.x + extent_x))),  // x_max
+                   min(static_cast<ushort>(height),
+                       max(0, __float2int_rd(mean2d.y - extent_y))),  // y_min
+                   min(static_cast<ushort>(height),
+                       max(0, __float2int_ru(mean2d.y + extent_y)))  // y_max
+      );
   const uint4 tile_bounds = make_uint4(
       screen_bounds.x / config::tile_width,
       __float2int_ru(static_cast<float>(screen_bounds.y) / config::tile_width),
