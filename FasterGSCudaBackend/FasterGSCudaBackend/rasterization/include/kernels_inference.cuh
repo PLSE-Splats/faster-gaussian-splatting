@@ -376,42 +376,32 @@ __global__ inline void __launch_bounds__(config::warp_size)
   // Get tile info.
   const auto block = cg::this_thread_block();
   const auto group_index = block.group_index();
-  const auto tile_index =
+  const auto thread_index = block.thread_index();
+  const auto thread_rank = block.thread_rank();
+  const auto [tile_x, tile_y] =
       make_ushort2(group_index.x / config::subtile_per_row,
                    group_index.y / config::subtile_per_column);
-  const auto tile_origin_x = group_index.x * config::tile_width;
-  const auto tile_origin_y = group_index.y * config::tile_height;
-  const uint thread_rank = block.thread_rank();
 
   // Get subtile (block) info.
-  const auto warp = cg::tiled_partition<config::warp_size>(block);
-  const auto lane_index = warp.thread_rank();
-  const auto warp_index = warp.meta_group_rank();
-  const auto subtile_x = warp_index % config::subtile_per_row;
-  const auto subtile_y = warp_index / config::subtile_per_row;
-  const auto subtile_origin_x =
-      tile_origin_x + subtile_x * config::warp_tile_width;
-  const auto subtile_origin_y =
-      tile_origin_y + subtile_y * config::warp_tile_height;
+  const auto subtile_origin_x = group_index.x * config::warp_tile_width;
+  const auto subtile_origin_y = group_index.y * config::warp_tile_height;
   const auto [subtile_left, subtile_right, subtile_top, subtile_bottom] =
       make_ushort4(subtile_origin_x, subtile_origin_x + config::warp_tile_width,
                    subtile_origin_y,
                    subtile_origin_y + config::warp_tile_height);
 
   // Compute pixel coordinates.
-  const auto [pixel_coord_x, pixel_coord_y] =
-      make_uint2(subtile_origin_x + lane_index % config::warp_tile_width,
-                 subtile_origin_y + lane_index / config::warp_tile_width);
+  const auto [pixel_coord_x, pixel_coord_y] = make_uint2(
+      subtile_origin_x + thread_index.x, subtile_origin_y + thread_index.y);
   const bool inside = pixel_coord_x < width && pixel_coord_y < height;
   const float2 pixel = make_float2(__uint2float_rn(pixel_coord_x),
                                    __uint2float_rn(pixel_coord_y)) +
                        0.5f;
 
   // Setup shared memory.
-  __shared__ float2 collected_mean2d[config::warp_cull_fetch_size];
-  __shared__ ushort4 collected_screen_bounds[config::warp_cull_fetch_size];
-  __shared__ float4 collected_conic_opacity[config::warp_cull_fetch_size];
-  __shared__ float3 collected_color[config::warp_cull_fetch_size];
+  __shared__ float2 collected_mean2d[config::warp_fetch_size];
+  __shared__ float4 collected_conic_opacity[config::warp_fetch_size];
+  __shared__ float3 collected_color[config::warp_fetch_size];
 
   // Initialize local storage.
   float3 color_pixel = make_float3(0.0f);
@@ -419,42 +409,44 @@ __global__ inline void __launch_bounds__(config::warp_size)
   bool done = !inside;
 
   // Collaborative loading and processing.
-  const auto [tile_x, tile_y] =
-      tile_instance_ranges[group_index.y * grid_width + group_index.x];
-  for (int n_points_remaining = tile_y - tile_x,
-           current_fetch_idx = tile_x + thread_rank;
-       n_points_remaining > 0;
-       n_points_remaining -= config::warp_cull_fetch_size,
-           current_fetch_idx += config::warp_cull_fetch_size) {
+  const auto [tile_instances_start, tile_instances_end] =
+      tile_instance_ranges[tile_y * grid_width + tile_x];
+  for (int n_instances_remaining = tile_instances_end - tile_instances_start,
+           current_fetch_idx = tile_instances_start + thread_rank;
+       n_instances_remaining > 0;
+       n_instances_remaining -= config::warp_fetch_size,
+           current_fetch_idx += config::warp_fetch_size) {
     // Exit if all threads are done.
-    if (__syncthreads_and(done)) break;
+    if (__all_sync(config::active_threads_mask, done)) break;
 
-    // Fetch next batch into shared memory if thread is within fetch bounds.
-    if (current_fetch_idx < tile_y &&
-        thread_rank < config::warp_cull_fetch_size) {
-      const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
-      collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
-      collected_screen_bounds[thread_rank] =
-          primitive_screen_bounds[primitive_idx];
-      collected_conic_opacity[thread_rank] =
-          primitive_conic_opacity[primitive_idx];
-      collected_color[thread_rank] = primitive_color[primitive_idx];
-    }
-    block.sync();
-    const int current_batch_size =
-        min(config::warp_cull_fetch_size, n_points_remaining);
-
-    // Subtile hit test and warp ballot broadcast result.
+    // Fetch next batch into shared memory if it's in thread and subtile bounds.
     bool subtile_hit = false;
-    if (lane_index < current_batch_size) {
+    if (current_fetch_idx < tile_instances_end &&
+        thread_rank < config::warp_fetch_size) {
+      // Get the instance index.
+      const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
+
+      // Hit test against subtile (this block).
       const auto [splat_left, splat_right, splat_top, splat_bottom] =
-          collected_screen_bounds[lane_index];
+          primitive_screen_bounds[primitive_idx];
       subtile_hit = splat_left < subtile_right && subtile_left < splat_right &&
                     splat_top < subtile_bottom && subtile_top < splat_bottom;
+
+      // Collect the splat data if we hit.
+      if (subtile_hit) {
+        collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
+        collected_conic_opacity[thread_rank] =
+            primitive_conic_opacity[primitive_idx];
+        collected_color[thread_rank] = primitive_color[primitive_idx];
+      }
     }
-    const uint subtile_hit_ballot = warp.ballot(subtile_hit);
+    const auto subtile_hit_ballot =
+        __ballot_sync(config::active_threads_mask, subtile_hit);
 
     // Work through this batch.
+    const int current_batch_size =
+        min(config::warp_fetch_size, n_instances_remaining);
+
     for (int j = 0; !done && j < current_batch_size; ++j) {
       // Skip non-intersecting splat.
       if ((subtile_hit_ballot >> j & 1u) == 0) continue;
