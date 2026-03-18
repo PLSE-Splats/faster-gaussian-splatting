@@ -277,8 +277,7 @@ __global__ void create_instances_cu(
   const uint remaining_threads = warp.ballot(compute_cooperatively);
   if (remaining_threads == 0) return;
 
-  __shared__ ushort4
-      collected_tile_bounds[config::block_size_create_instances];
+  __shared__ ushort4 collected_tile_bounds[config::block_size_create_instances];
   __shared__ float2
       collected_mean2d_shifted[config::block_size_create_instances];
   __shared__ float4
@@ -296,8 +295,7 @@ __global__ void create_instances_cu(
         warp.shfl(current_write_offset, current_lane);
 
     const uint read_offset_shared = warp_start + current_lane;
-    const ushort4 tile_bounds_coop =
-        collected_tile_bounds[read_offset_shared];
+    const ushort4 tile_bounds_coop = collected_tile_bounds[read_offset_shared];
     const float2 mean2d_shifted_coop =
         collected_mean2d_shifted[read_offset_shared];
     const float4 conic_power_threshold_coop =
@@ -361,10 +359,11 @@ __global__ void extract_instance_ranges_cu(
     tile_instance_ranges[instance_tile_idx].y = n_instances;
 }
 
-__global__ void __launch_bounds__(config::block_size_blend)
+__global__ inline void __launch_bounds__(config::block_size_blend)
     blend_cu(const uint2* __restrict__ tile_instance_ranges,
              const uint* __restrict__ instance_primitive_indices,
              const float2* __restrict__ primitive_mean2d,
+             const ushort4* __restrict__ primitive_screen_bounds,
              const float4* __restrict__ primitive_conic_opacity,
              const float3* __restrict__ primitive_color,
              const float3* __restrict__ bg_color, float* __restrict__ image,
@@ -381,25 +380,29 @@ __global__ void __launch_bounds__(config::block_size_blend)
   const auto warp = cg::tiled_partition<config::warp_size>(block);
   const auto lane_index = warp.thread_rank();
   const auto warp_index = warp.meta_group_rank();
-  const auto warp_block_start_index = warp_index * config::warp_size;
   const auto subtile_x = warp_index % config::subtile_per_row;
   const auto subtile_y = warp_index / config::subtile_per_row;
   const auto subtile_origin_x =
       tile_origin_x + subtile_x * config::warp_tile_width;
   const auto subtile_origin_y =
       tile_origin_y + subtile_y * config::warp_tile_height;
+  const auto [subtile_left, subtile_right, subtile_top, subtile_bottom] =
+      make_ushort4(subtile_origin_x, subtile_origin_x + config::warp_tile_width,
+                   subtile_origin_y,
+                   subtile_origin_y + config::warp_tile_height);
 
   // Compute pixel coordinates.
-  const uint2 pixel_coords =
+  const auto [pixel_coord_x, pixel_coord_y] =
       make_uint2(subtile_origin_x + lane_index % config::warp_tile_width,
                  subtile_origin_y + lane_index / config::warp_tile_width);
-  const bool inside = pixel_coords.x < width && pixel_coords.y < height;
-  const float2 pixel = make_float2(__uint2float_rn(pixel_coords.x),
-                                   __uint2float_rn(pixel_coords.y)) +
+  const bool inside = pixel_coord_x < width && pixel_coord_y < height;
+  const float2 pixel = make_float2(__uint2float_rn(pixel_coord_x),
+                                   __uint2float_rn(pixel_coord_y)) +
                        0.5f;
 
   // Setup shared memory.
   __shared__ float2 collected_mean2d[config::warp_cull_fetch_size];
+  __shared__ ushort4 collected_screen_bounds[config::warp_cull_fetch_size];
   __shared__ float4 collected_conic_opacity[config::warp_cull_fetch_size];
   __shared__ float3 collected_color[config::warp_cull_fetch_size];
 
@@ -409,10 +412,10 @@ __global__ void __launch_bounds__(config::block_size_blend)
   bool done = !inside;
 
   // Collaborative loading and processing.
-  const uint2 tile_range =
+  const auto [tile_x, tile_y] =
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
-  for (int n_points_remaining = tile_range.y - tile_range.x,
-           current_fetch_idx = tile_range.x + thread_rank;
+  for (int n_points_remaining = tile_y - tile_x,
+           current_fetch_idx = tile_x + thread_rank;
        n_points_remaining > 0;
        n_points_remaining -= config::warp_cull_fetch_size,
            current_fetch_idx += config::warp_cull_fetch_size) {
@@ -420,37 +423,49 @@ __global__ void __launch_bounds__(config::block_size_blend)
     if (__syncthreads_and(done)) break;
 
     // Fetch next batch into shared memory if thread is within fetch bounds.
-    if (current_fetch_idx < tile_range.y &&
+    if (current_fetch_idx < tile_y &&
         thread_rank < config::warp_cull_fetch_size) {
-      // Fetch.
       const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
       collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
+      collected_screen_bounds[thread_rank] =
+          primitive_screen_bounds[primitive_idx];
       collected_conic_opacity[thread_rank] =
           primitive_conic_opacity[primitive_idx];
       collected_color[thread_rank] = primitive_color[primitive_idx];
-
-      // Compute bounds.
     }
     block.sync();
     const int current_batch_size =
-        min(config::block_size_blend, n_points_remaining);
+        min(config::warp_cull_fetch_size, n_points_remaining);
+
+    // Subtile hit test and warp ballot broadcast result.
+    bool subtile_hit = false;
+    if (lane_index < current_batch_size) {
+      const auto [splat_left, splat_right, splat_top, splat_bottom] =
+          collected_screen_bounds[lane_index];
+      subtile_hit = splat_left < subtile_right && subtile_left < splat_right &&
+                    splat_top < subtile_bottom && subtile_top < splat_bottom;
+    }
+    const uint subtile_hit_ballot = warp.ballot(subtile_hit);
+
+    // Work through this batch.
     for (int j = 0; !done && j < current_batch_size; ++j) {
-      // evaluate current Gaussian at pixel
+      // Skip non-intersecting splat.
+      if ((subtile_hit_ballot >> j & 1u) == 0) continue;
+
+      // Evaluate current splat at pixel.
       const float4 conic_opacity = collected_conic_opacity[j];
-      const float3 conic = make_float3(conic_opacity);
+      const auto [conic_x, conic_y, conic_z] = make_float3(conic_opacity);
       const float opacity = conic_opacity.w;
-      const float2 delta = collected_mean2d[j] - pixel;
+      const auto [delta_x, delta_y] = collected_mean2d[j] - pixel;
       const float exponent =
-          -0.5f * (conic.x * delta.x * delta.x + conic.z * delta.y * delta.y) -
-          conic.y * delta.x * delta.y;
+          -0.5f * (conic_x * delta_x * delta_x + conic_z * delta_y * delta_y) -
+          conic_y * delta_x * delta_y;
       const float gaussian = expf(fminf(exponent, 0.0f));
-      if (!config::original_opacity_interpretation &&
-          gaussian < config::min_alpha_threshold)
+      if constexpr (!config::original_opacity_interpretation &&
+                    gaussian < config::min_alpha_threshold)
         continue;
       const float alpha = opacity * gaussian;
-      if (config::original_opacity_interpretation &&
-          alpha < config::min_alpha_threshold)
-        continue;
+      if (alpha < config::min_alpha_threshold) continue;
 
       // blend fragment into pixel color
       color_pixel += transmittance * alpha * collected_color[j];
@@ -461,7 +476,6 @@ __global__ void __launch_bounds__(config::block_size_blend)
       // early stopping
       if (transmittance < config::transmittance_threshold) {
         done = true;
-        continue;
       }
     }
   }
@@ -469,7 +483,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
     // apply background color
     color_pixel += transmittance * bg_color[0];
     // store results
-    const uint pixel_idx = width * pixel_coords.y + pixel_coords.x;
+    const uint pixel_idx = width * pixel_coord_y + pixel_coord_x;
     if (output_chw) {
       const uint n_pixels = width * height;
       image[pixel_idx] = __saturatef(color_pixel.x);

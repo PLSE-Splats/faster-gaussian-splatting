@@ -154,7 +154,7 @@ void faster_gs::rasterization::rasterize(
   kernels::inference::blend_cu<<<grid, block>>>(
       tile_buffers.instance_ranges,
       instance_buffers.primitive_indices.Current(), primitive_buffers.mean2d,
-      primitive_buffers.conic_opacity, primitive_buffers.color, bg_color, image,
-      width, height, grid.x, to_chw);
+      primitive_buffers.screen_bounds, primitive_buffers.conic_opacity,
+      primitive_buffers.color, bg_color, image, width, height, grid.x, to_chw);
   CHECK_CUDA(config::debug, "blend")
 }
