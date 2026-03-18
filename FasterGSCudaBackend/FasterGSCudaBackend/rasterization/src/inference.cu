@@ -24,7 +24,9 @@ void faster_gs::rasterization::inference(
     const bool proper_antialiasing, const bool to_chw) {
   const dim3 grid(div_round_up(width, config::tile_width),
                   div_round_up(height, config::tile_height), 1);
-  const dim3 block(config::tile_width, config::tile_height, 1);
+  const dim3 subtile_grid(div_round_up(width, config::warp_tile_width),
+                          div_round_up(height, config::warp_tile_height), 1);
+  constexpr dim3 block(config::warp_tile_width, config::warp_tile_height, 1);
   const int n_tiles = grid.x * grid.y;
   const int end_bit = extract_end_bit(n_tiles - 1);
 
@@ -99,10 +101,10 @@ void faster_gs::rasterization::inference(
 // 4Kx4K images beyond that, 32 bit keys are needed and for best performance, we
 // template the remaining rasterization steps note that with c++20 one could use
 // a templated lambda to improve readability here
-#define RASTERIZE_ARGS                                                   \
-  resize_instance_buffers, primitive_buffers, tile_buffers, grid, block, \
-      bg_color, image, memset_stream, n_visible_primitives, n_instances, \
-      end_bit, width, height, to_chw
+#define RASTERIZE_ARGS                                            \
+  resize_instance_buffers, primitive_buffers, tile_buffers, grid, \
+      subtile_grid, block, bg_color, image, memset_stream,        \
+      n_visible_primitives, n_instances, end_bit, width, height, to_chw
   if (end_bit <= 16)
     rasterize<ushort>(RASTERIZE_ARGS);
   else
@@ -114,10 +116,10 @@ template <typename KeyT>
 void faster_gs::rasterization::rasterize(
     std::function<char*(size_t)>& resize_instance_buffers,
     PrimitiveBuffers& primitive_buffers, TileBuffers& tile_buffers,
-    const dim3& grid, const dim3& block, const float3* bg_color, float* image,
-    const cudaStream_t memset_stream, const int n_visible_primitives,
-    const int n_instances, const int end_bit, const int width, const int height,
-    const bool to_chw) {
+    const dim3& grid, const dim3& subtile_grid, const dim3& block,
+    const float3* bg_color, float* image, const cudaStream_t memset_stream,
+    const int n_visible_primitives, const int n_instances, const int end_bit,
+    const int width, const int height, const bool to_chw) {
   char* instance_buffers_blob = resize_instance_buffers(
       required<InstanceBuffers<KeyT>>(n_instances, end_bit));
   InstanceBuffers<KeyT> instance_buffers = InstanceBuffers<KeyT>::from_blob(
@@ -151,7 +153,7 @@ void faster_gs::rasterization::rasterize(
     CHECK_CUDA(config::debug, "extract_instance_ranges")
   }
 
-  kernels::inference::blend_cu<<<grid, block>>>(
+  kernels::inference::blend_cu<<<subtile_grid, block>>>(
       tile_buffers.instance_ranges,
       instance_buffers.primitive_indices.Current(), primitive_buffers.mean2d,
       primitive_buffers.screen_bounds, primitive_buffers.conic_opacity,

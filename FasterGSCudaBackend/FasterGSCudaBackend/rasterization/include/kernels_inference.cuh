@@ -363,7 +363,7 @@ __global__ void extract_instance_ranges_cu(
     tile_instance_ranges[instance_tile_idx].y = n_instances;
 }
 
-__global__ inline void __launch_bounds__(config::block_size_blend)
+__global__ inline void __launch_bounds__(config::warp_size)
     blend_cu(const uint2* __restrict__ tile_instance_ranges,
              const uint* __restrict__ instance_primitive_indices,
              const float2* __restrict__ primitive_mean2d,
@@ -376,11 +376,14 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
   // Get tile info.
   const auto block = cg::this_thread_block();
   const auto group_index = block.group_index();
+  const auto tile_index =
+      make_ushort2(group_index.x / config::subtile_per_row,
+                   group_index.y / config::subtile_per_column);
   const auto tile_origin_x = group_index.x * config::tile_width;
   const auto tile_origin_y = group_index.y * config::tile_height;
   const uint thread_rank = block.thread_rank();
 
-  // Create warp info.
+  // Get subtile (block) info.
   const auto warp = cg::tiled_partition<config::warp_size>(block);
   const auto lane_index = warp.thread_rank();
   const auto warp_index = warp.meta_group_rank();
