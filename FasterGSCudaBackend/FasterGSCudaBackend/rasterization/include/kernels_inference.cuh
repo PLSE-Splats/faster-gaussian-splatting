@@ -313,7 +313,8 @@ __global__ void create_instances_cu(
 
     const uint remaining_instance_count =
         instance_count_coop - config::n_sequential_threshold;
-    const uint n_iterations = div_round_up(remaining_instance_count, config::warp_size);
+    const uint n_iterations =
+        div_round_up(remaining_instance_count, config::warp_size);
     for (uint i = 0; i < n_iterations; i++) {
       const uint instance_idx =
           i * config::warp_size + lane_idx + config::n_sequential_threshold;
@@ -403,10 +404,10 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
                        0.5f;
 
   // Setup shared memory.
-  __shared__ float2 collected_mean2d[config::warp_cull_fetch_size];
-  __shared__ ushort4 collected_screen_bounds[config::warp_cull_fetch_size];
-  __shared__ float4 collected_conic_opacity[config::warp_cull_fetch_size];
-  __shared__ float3 collected_color[config::warp_cull_fetch_size];
+  __shared__ float2 collected_mean2d[config::block_size_blend];
+  __shared__ ushort4 collected_screen_bounds[config::block_size_blend];
+  __shared__ float4 collected_conic_opacity[config::block_size_blend];
+  __shared__ float3 collected_color[config::block_size_blend];
 
   // Initialize local storage.
   float3 color_pixel = make_float3(0.0f);
@@ -414,19 +415,18 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
   bool done = !inside;
 
   // Collaborative loading and processing.
-  const auto [tile_x, tile_y] =
+  const auto [tile_instance_index_low, tile_instance_index_high] =
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
-  for (int n_points_remaining = tile_y - tile_x,
-           current_fetch_idx = tile_x + thread_rank;
-       n_points_remaining > 0;
-       n_points_remaining -= config::warp_cull_fetch_size,
-           current_fetch_idx += config::warp_cull_fetch_size) {
+  for (int n_points_remaining =
+               tile_instance_index_high - tile_instance_index_low,
+           current_fetch_idx = tile_instance_index_low + thread_rank;
+       n_points_remaining > 0; n_points_remaining -= config::block_size_blend,
+           current_fetch_idx += config::block_size_blend) {
     // Exit if all threads are done.
     if (__syncthreads_and(done)) break;
 
     // Fetch next batch into shared memory if thread is within fetch bounds.
-    if (current_fetch_idx < tile_y &&
-        thread_rank < config::warp_cull_fetch_size) {
+    if (current_fetch_idx < tile_instance_index_high) {
       const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
       collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
       collected_screen_bounds[thread_rank] =
@@ -437,47 +437,51 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
     }
     block.sync();
     const int current_batch_size =
-        min(config::warp_cull_fetch_size, n_points_remaining);
-
-    // Subtile hit test and warp ballot broadcast result.
-    bool subtile_hit = false;
-    if (lane_index < current_batch_size) {
-      const auto [splat_left, splat_right, splat_top, splat_bottom] =
-          collected_screen_bounds[lane_index];
-      subtile_hit = splat_left < subtile_right && subtile_left < splat_right &&
-                    splat_top < subtile_bottom && subtile_top < splat_bottom;
-    }
-    const uint subtile_hit_ballot = warp.ballot(subtile_hit);
+        min(config::block_size_blend, n_points_remaining);
 
     // Work through this batch.
-    for (int j = 0; !done && j < current_batch_size; ++j) {
-      // Skip non-intersecting splat.
-      if ((subtile_hit_ballot >> j & 1u) == 0) continue;
+    for (int i = 0; i < current_batch_size; i += config::warp_size) {
+      // Subtile hit test and warp ballot broadcast result.
+      bool subtile_hit = false;
+      if (lane_index < current_batch_size) {
+        const auto [splat_left, splat_right, splat_top, splat_bottom] =
+            collected_screen_bounds[i + lane_index];
+        subtile_hit = splat_left < subtile_right &&
+                      subtile_left < splat_right &&
+                      splat_top < subtile_bottom && subtile_top < splat_bottom;
+      }
+      const uint subtile_hit_ballot = warp.ballot(subtile_hit);
 
-      // Evaluate current splat at pixel.
-      const float4 conic_opacity = collected_conic_opacity[j];
-      const auto [conic_x, conic_y, conic_z] = make_float3(conic_opacity);
-      const float opacity = conic_opacity.w;
-      const auto [delta_x, delta_y] = collected_mean2d[j] - pixel;
-      const float exponent =
-          -0.5f * (conic_x * delta_x * delta_x + conic_z * delta_y * delta_y) -
-          conic_y * delta_x * delta_y;
-      const float gaussian = expf(fminf(exponent, 0.0f));
-      if constexpr (!config::original_opacity_interpretation &&
-                    gaussian < config::min_alpha_threshold)
-        continue;
-      const float alpha = opacity * gaussian;
-      if (alpha < config::min_alpha_threshold) continue;
+      // Blend this warp batch.
+      for (int j = i; !done && j < config::block_size_blend; ++j) {
+        // Skip non-intersecting splat.
+        if ((subtile_hit_ballot >> j & 1u) == 0) continue;
 
-      // blend fragment into pixel color
-      color_pixel += transmittance * alpha * collected_color[j];
+        // Evaluate current splat at pixel.
+        const float4 conic_opacity = collected_conic_opacity[j];
+        const auto [conic_x, conic_y, conic_z] = make_float3(conic_opacity);
+        const float opacity = conic_opacity.w;
+        const auto [delta_x, delta_y] = collected_mean2d[j] - pixel;
+        const float exponent = -0.5f * (conic_x * delta_x * delta_x +
+                                        conic_z * delta_y * delta_y) -
+                               conic_y * delta_x * delta_y;
+        const float gaussian = expf(fminf(exponent, 0.0f));
+        if constexpr (!config::original_opacity_interpretation &&
+                      gaussian < config::min_alpha_threshold)
+          continue;
+        const float alpha = opacity * gaussian;
+        if (alpha < config::min_alpha_threshold) continue;
 
-      // update transmittance
-      transmittance *= 1.0f - alpha;
+        // blend fragment into pixel color
+        color_pixel += transmittance * alpha * collected_color[j];
 
-      // early stopping
-      if (transmittance < config::transmittance_threshold) {
-        done = true;
+        // update transmittance
+        transmittance *= 1.0f - alpha;
+
+        // early stopping
+        if (transmittance < config::transmittance_threshold) {
+          done = true;
+        }
       }
     }
   }
