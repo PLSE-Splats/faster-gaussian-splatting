@@ -443,7 +443,7 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
     for (int i = 0; i < current_batch_size; i += config::warp_size) {
       // Subtile hit test and warp ballot broadcast result.
       bool subtile_hit = false;
-      if (lane_index < current_batch_size) {
+      if (i + lane_index < current_batch_size) {
         const auto [splat_left, splat_right, splat_top, splat_bottom] =
             collected_screen_bounds[i + lane_index];
         subtile_hit = splat_left < subtile_right &&
@@ -455,7 +455,7 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
       // Blend this warp batch.
       for (int j = i; !done && j < config::block_size_blend; ++j) {
         // Skip non-intersecting splat.
-        if ((subtile_hit_ballot >> j & 1u) == 0) continue;
+        if ((subtile_hit_ballot >> (j % config::warp_size) & 1u) == 0) continue;
 
         // Evaluate current splat at pixel.
         const float4 conic_opacity = collected_conic_opacity[j];
