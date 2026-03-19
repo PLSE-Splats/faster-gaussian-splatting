@@ -338,17 +338,17 @@ namespace faster_gs::rasterization::kernels::backward {
         float3 grad_color_pixel;
         float grad_alpha_common;
 
-        bucket_color_transmittance += bucket_idx * config::block_size_blend;
+        bucket_color_transmittance += bucket_idx * config::tile_size;
         __shared__ uint collected_last_contributor[32];
         __shared__ float4 collected_color_pixel_after_transmittance[32];
         __shared__ float4 collected_grad_info_pixel[32];
 
         // iterate over all pixels in the tile
         #pragma unroll
-        for (int i = 0; i < config::block_size_blend + 31; ++i) {
+        for (int i = 0; i < config::tile_size + 31; ++i) {
             if (i % 32 == 0) {
                 const uint local_idx = i + lane_idx;
-                if (local_idx < config::block_size_blend) {
+                if (local_idx < config::tile_size) {
                     const float4 color_transmittance = bucket_color_transmittance[local_idx];
                     const uint2 pixel_coords = {start_pixel_coords.x + local_idx % config::tile_width, start_pixel_coords.y + local_idx / config::tile_width};
                     const uint pixel_idx = width * pixel_coords.y + pixel_coords.x;
@@ -398,7 +398,7 @@ namespace faster_gs::rasterization::kernels::backward {
             const bool valid_pixel = pixel_coords.x < width && pixel_coords.y < height;
 
             // leader thread loads values from shared memory into registers
-            if (valid_primitive && valid_pixel && lane_idx == 0 && idx < config::block_size_blend) {
+            if (valid_primitive && valid_pixel && lane_idx == 0 && idx < config::tile_size) {
                 const int current_shmem_index = i % 32;
                 last_contributor = collected_last_contributor[current_shmem_index];
                 const float4 color_pixel_after_transmittance = collected_color_pixel_after_transmittance[current_shmem_index];
@@ -409,7 +409,7 @@ namespace faster_gs::rasterization::kernels::backward {
                 grad_alpha_common = grad_info_pixel.w;
             }
 
-            const bool skip = !valid_primitive || !valid_pixel || idx < 0 || idx >= config::block_size_blend || tile_primitive_idx >= last_contributor;
+            const bool skip = !valid_primitive || !valid_pixel || idx < 0 || idx >= config::tile_size || tile_primitive_idx >= last_contributor;
             if (skip) continue;
 
             const float2 pixel = make_float2(__uint2float_rn(pixel_coords.x), __uint2float_rn(pixel_coords.y)) + 0.5f;

@@ -404,10 +404,10 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
                        0.5f;
 
   // Setup shared memory.
-  __shared__ float2 collected_mean2d[config::block_size_blend];
-  __shared__ ushort4 collected_screen_bounds[config::block_size_blend];
-  __shared__ float4 collected_conic_opacity[config::block_size_blend];
-  __shared__ float3 collected_color[config::block_size_blend];
+  __shared__ float2 collected_mean2d[config::tile_size];
+  __shared__ ushort4 collected_screen_bounds[config::tile_size];
+  __shared__ float4 collected_conic_opacity[config::tile_size];
+  __shared__ float3 collected_color[config::tile_size];
 
   // Initialize local storage.
   float3 color_pixel = make_float3(0.0f);
@@ -420,8 +420,8 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
   for (int n_points_remaining =
                tile_instance_index_high - tile_instance_index_low,
            current_fetch_idx = tile_instance_index_low + thread_rank;
-       n_points_remaining > 0; n_points_remaining -= config::block_size_blend,
-           current_fetch_idx += config::block_size_blend) {
+       n_points_remaining > 0; n_points_remaining -= config::tile_size,
+           current_fetch_idx += config::tile_size) {
     // Exit if all threads are done.
     if (__syncthreads_and(done)) break;
 
@@ -437,7 +437,7 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
     }
     block.sync();
     const int current_batch_size =
-        min(config::block_size_blend, n_points_remaining);
+        min(config::tile_size, n_points_remaining);
 
     // Work through this batch.
     for (int batch_index = 0; batch_index < current_batch_size;

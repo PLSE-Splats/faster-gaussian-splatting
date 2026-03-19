@@ -136,12 +136,12 @@ namespace faster_gs::rasterization {
         static TileBuffers from_blob(char*& blob, int n_tiles) {
             TileBuffers buffers;
             obtain(blob, buffers.instance_ranges, n_tiles);
-            obtain(blob, buffers.final_transmittances, n_tiles * config::block_size_blend);
+            obtain(blob, buffers.final_transmittances, n_tiles * config::tile_size);
             obtain(blob, buffers.n_buckets, n_tiles);
             obtain(blob, buffers.buckets_offset, n_tiles);
             obtain(blob, buffers.max_n_processed, n_tiles);
-            obtain(blob, buffers.n_processed, n_tiles * config::block_size_blend);
-            obtain(blob, buffers.final_transmittances, n_tiles * config::block_size_blend);
+            obtain(blob, buffers.n_processed, n_tiles * config::tile_size);
+            obtain(blob, buffers.final_transmittances, n_tiles * config::tile_size);
             cub::DeviceScan::InclusiveSum(
                 nullptr, buffers.cub_workspace_size,
                 buffers.n_buckets, buffers.buckets_offset,
@@ -158,8 +158,8 @@ namespace faster_gs::rasterization {
 
         static BucketBuffers from_blob(char*& blob, int n_buckets) {
             BucketBuffers buffers;
-            obtain(blob, buffers.tile_index, n_buckets * config::block_size_blend);
-            obtain(blob, buffers.color_transmittance, n_buckets * config::block_size_blend);
+            obtain(blob, buffers.tile_index, n_buckets * config::tile_size);
+            obtain(blob, buffers.color_transmittance, n_buckets * config::tile_size);
             return buffers;
         }
     };

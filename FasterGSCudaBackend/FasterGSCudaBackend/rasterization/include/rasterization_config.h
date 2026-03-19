@@ -67,9 +67,13 @@ DEF int block_size_apply_depth_ordering = 256;
 DEF int block_size_create_instances = 256;
 DEF int block_size_extract_instance_ranges = 256;
 DEF int block_size_extract_bucket_counts = 256;
+DEF int block_width_blend = 16;
+DEF int block_height_blend = 16;
+DEF int block_size_blend = block_width_blend * block_height_blend;
+// Tile size constants.
 DEF int tile_width = 32;
 DEF int tile_height = 32;
-DEF int block_size_blend = tile_width * tile_height;
+DEF int tile_size = tile_width * tile_height;
 DEF int n_sequential_threshold = 4;
 // warp size constants
 DEF uint warp_size = 32;

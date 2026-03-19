@@ -366,18 +366,18 @@ namespace faster_gs::rasterization::kernels::pruning_scores {
         const bool inside = pixel_coords.x < width && pixel_coords.y < height;
         const float2 pixel = make_float2(__uint2float_rn(pixel_coords.x), __uint2float_rn(pixel_coords.y)) + 0.5f;
         // setup shared memory
-        __shared__ uint collected_primitive_idx[config::block_size_blend];
-        __shared__ float2 collected_mean2d[config::block_size_blend];
-        __shared__ float4 collected_conic_opacity[config::block_size_blend];
-        __shared__ float3 collected_color[config::block_size_blend];
+        __shared__ uint collected_primitive_idx[config::tile_size];
+        __shared__ float2 collected_mean2d[config::tile_size];
+        __shared__ float4 collected_conic_opacity[config::tile_size];
+        __shared__ float3 collected_color[config::tile_size];
         // initialize local storage
         float3 color_pixel = make_float3(0.0f);
         float transmittance = 1.0f;
         bool done = !inside;
         // collaborative loading and processing
         const uint2 tile_range = tile_instance_ranges[group_index.y * grid_width + group_index.x];
-        for (int n_points_remaining = tile_range.y - tile_range.x, current_fetch_idx = tile_range.x + thread_rank; n_points_remaining > 0; n_points_remaining -= config::block_size_blend, current_fetch_idx += config::block_size_blend) {
-            if (__syncthreads_count(done) == config::block_size_blend) break;
+        for (int n_points_remaining = tile_range.y - tile_range.x, current_fetch_idx = tile_range.x + thread_rank; n_points_remaining > 0; n_points_remaining -= config::tile_size, current_fetch_idx += config::tile_size) {
+            if (__syncthreads_count(done) == config::tile_size) break;
             if (current_fetch_idx < tile_range.y) {
                 const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
                 collected_primitive_idx[thread_rank] = primitive_idx;
@@ -386,7 +386,7 @@ namespace faster_gs::rasterization::kernels::pruning_scores {
                 collected_color[thread_rank] = primitive_color[primitive_idx];
             }
             block.sync();
-            const int current_batch_size = min(config::block_size_blend, n_points_remaining);
+            const int current_batch_size = min(config::tile_size, n_points_remaining);
             for (int j = 0; !done && j < current_batch_size; ++j) {
                 // evaluate current Gaussian at pixel
                 const float4 conic_opacity = collected_conic_opacity[j];
@@ -420,8 +420,8 @@ namespace faster_gs::rasterization::kernels::pruning_scores {
         transmittance = 1.0f;
         done = !inside;
         // collaborative loading and processing
-        for (int n_points_remaining = tile_range.y - tile_range.x, current_fetch_idx = tile_range.x + thread_rank; n_points_remaining > 0; n_points_remaining -= config::block_size_blend, current_fetch_idx += config::block_size_blend) {
-            if (__syncthreads_count(done) == config::block_size_blend) break;
+        for (int n_points_remaining = tile_range.y - tile_range.x, current_fetch_idx = tile_range.x + thread_rank; n_points_remaining > 0; n_points_remaining -= config::tile_size, current_fetch_idx += config::tile_size) {
+            if (__syncthreads_count(done) == config::tile_size) break;
             if (current_fetch_idx < tile_range.y) {
                 const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
                 collected_primitive_idx[thread_rank] = primitive_idx;
@@ -430,7 +430,7 @@ namespace faster_gs::rasterization::kernels::pruning_scores {
                 collected_color[thread_rank] = primitive_color[primitive_idx];
             }
             block.sync();
-            const int current_batch_size = min(config::block_size_blend, n_points_remaining);
+            const int current_batch_size = min(config::tile_size, n_points_remaining);
             for (int j = 0; !done && j < current_batch_size; ++j) {
                 // evaluate current Gaussian at pixel
                 const float4 conic_opacity = collected_conic_opacity[j];
