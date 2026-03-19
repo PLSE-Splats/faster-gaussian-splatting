@@ -440,12 +440,13 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
         min(config::block_size_blend, n_points_remaining);
 
     // Work through this batch.
-    for (int i = 0; i < current_batch_size; i += config::warp_size) {
+    for (int batch_index = 0; batch_index < current_batch_size;
+         batch_index += config::warp_size) {
       // Subtile hit test and warp ballot broadcast result.
       bool subtile_hit = false;
-      if (i + lane_index < current_batch_size) {
+      if (batch_index + lane_index < current_batch_size) {
         const auto [splat_left, splat_right, splat_top, splat_bottom] =
-            collected_screen_bounds[i + lane_index];
+            collected_screen_bounds[batch_index + lane_index];
         subtile_hit = splat_left < subtile_right &&
                       subtile_left < splat_right &&
                       splat_top < subtile_bottom && subtile_top < splat_bottom;
@@ -453,15 +454,17 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
       const uint subtile_hit_ballot = warp.ballot(subtile_hit);
 
       // Blend this warp batch.
-      for (int j = i; !done && j < config::block_size_blend; ++j) {
+      for (int warp_batch_index = 0;
+           !done && warp_batch_index < config::warp_size; ++warp_batch_index) {
         // Skip non-intersecting splat.
-        if ((subtile_hit_ballot >> (j % config::warp_size) & 1u) == 0) continue;
+        if ((subtile_hit_ballot >> warp_batch_index & 1u) == 0) continue;
 
         // Evaluate current splat at pixel.
-        const float4 conic_opacity = collected_conic_opacity[j];
+        const auto render_index = batch_index + warp_batch_index;
+        const float4 conic_opacity = collected_conic_opacity[render_index];
         const auto [conic_x, conic_y, conic_z] = make_float3(conic_opacity);
         const float opacity = conic_opacity.w;
-        const auto [delta_x, delta_y] = collected_mean2d[j] - pixel;
+        const auto [delta_x, delta_y] = collected_mean2d[render_index] - pixel;
         const float exponent = -0.5f * (conic_x * delta_x * delta_x +
                                         conic_z * delta_y * delta_y) -
                                conic_y * delta_x * delta_y;
@@ -473,7 +476,7 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
         if (alpha < config::min_alpha_threshold) continue;
 
         // blend fragment into pixel color
-        color_pixel += transmittance * alpha * collected_color[j];
+        color_pixel += transmittance * alpha * collected_color[render_index];
 
         // update transmittance
         transmittance *= 1.0f - alpha;
