@@ -72,7 +72,7 @@ DEF int tile_height = 16;
 DEF int block_size_blend = tile_width * tile_height;
 DEF int n_sequential_threshold = 4;
 // warp size constants
-DEF int warp_size = 32;
+DEF uint warp_size = 32;
 DEF int warp_tile_width = 8;
 DEF int warp_tile_height = 4;
 DEF int subtile_per_row = tile_width / warp_tile_width;

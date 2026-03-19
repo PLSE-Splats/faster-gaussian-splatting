@@ -113,9 +113,8 @@ namespace faster_gs::rasterization::kernels {
         const uint tile_count,
         const bool active)
     {
-        constexpr uint warp_size = 32;
         auto block = cg::this_thread_block();
-        auto warp = cg::tiled_partition<warp_size>(block);
+        auto warp = cg::tiled_partition<config::warp_size>(block);
         const uint lane_idx = warp.thread_rank();
 
         const float2 mean2d_shifted = mean2d - 0.5f;
@@ -133,7 +132,7 @@ namespace faster_gs::rasterization::kernels {
         if (remaining_threads == 0) return n_touched_tiles;
 
         const uint n_remaining_threads = __popc(remaining_threads);
-        for (uint n = 0; n < n_remaining_threads && n < warp_size; n++) {
+        for (uint n = 0; n < n_remaining_threads && n < config::warp_size; n++) {
             const uint current_lane = __fns(remaining_threads, 0, n + 1);
 
             const uint2 min_screen_bounds_coop = make_uint2(
@@ -155,9 +154,9 @@ namespace faster_gs::rasterization::kernels {
             const float power_threshold_coop = warp.shfl(power_threshold, current_lane);
 
             const uint remaining_tile_count = tile_count_coop - config::n_sequential_threshold;
-            const uint n_iterations = div_round_up(remaining_tile_count, warp_size);
+            const uint n_iterations = div_round_up(remaining_tile_count, config::warp_size);
             for (uint i = 0; i < n_iterations; i++) {
-                const uint instance_idx = i * warp_size + lane_idx + config::n_sequential_threshold;
+                const uint instance_idx = i * config::warp_size + lane_idx + config::n_sequential_threshold;
                 const uint tile_x = min_screen_bounds_coop.x + (instance_idx % screen_bounds_width_coop);
                 const uint tile_y = min_screen_bounds_coop.y + (instance_idx / screen_bounds_width_coop);
                 const bool contributes = instance_idx < tile_count_coop && will_primitive_contribute(mean2d_shifted_coop, conic_coop, tile_x, tile_y, power_threshold_coop);

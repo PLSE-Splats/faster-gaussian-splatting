@@ -12,7 +12,7 @@ namespace cg = cooperative_groups;
 
 namespace faster_gs::rasterization::kernels::inference {
 
-__global__ void preprocess_cu(
+__global__ inline void preprocess_cu(
     const float3* __restrict__ means, const float3* __restrict__ scales,
     const float4* __restrict__ rotations, const float* __restrict__ opacities,
     const float3* __restrict__ sh_coefficients_0,
@@ -31,9 +31,8 @@ __global__ void preprocess_cu(
     const float height, const float focal_x, const float focal_y,
     const float center_x, const float center_y, const float near_plane,
     const float far_plane, const bool proper_antialiasing) {
-  constexpr uint warp_size = 32;
   auto block = cg::this_thread_block();
-  auto warp = cg::tiled_partition<warp_size>(block);
+  auto warp = cg::tiled_partition<config::warp_size>(block);
   const uint thread_idx = cg::this_grid().thread_rank();
 
   bool active = true;
@@ -196,7 +195,7 @@ __global__ void preprocess_cu(
   atomicAdd(n_instances, n_touched_tiles);
 }
 
-__global__ void apply_depth_ordering_cu(
+__global__ inline void apply_depth_ordering_cu(
     const uint* __restrict__ primitive_indices_sorted,
     const uint* __restrict__ primitive_n_touched_tiles,
     uint* __restrict__ primitive_offset, const uint n_visible_primitives) {
@@ -218,13 +217,12 @@ __global__ void create_instances_cu(
     KeyT* __restrict__ instance_keys,
     uint* __restrict__ instance_primitive_indices, const uint grid_width,
     const uint n_visible_primitives) {
-  constexpr uint warp_size = 32;
   auto block = cg::this_thread_block();
-  auto warp = cg::tiled_partition<warp_size>(block);
+  auto warp = cg::tiled_partition<config::warp_size>(block);
   const uint thread_idx = cg::this_grid().thread_rank();
   const uint thread_rank = block.thread_rank();
   const uint warp_idx = warp.meta_group_rank();
-  const uint warp_start = warp_idx * warp_size;
+  const uint warp_start = warp_idx * config::warp_size;
   const uint lane_idx = warp.thread_rank();
   const uint previous_lanes_mask = (1 << lane_idx) - 1;
 
@@ -292,7 +290,7 @@ __global__ void create_instances_cu(
       make_float4(conic, power_threshold);
 
   const uint n_remaining_threads = __popc(remaining_threads);
-  for (uint n = 0; n < n_remaining_threads && n < warp_size; n++) {
+  for (uint n = 0; n < n_remaining_threads && n < config::warp_size; n++) {
     const uint current_lane = __fns(remaining_threads, 0, n + 1);
     const uint primitive_idx_coop = warp.shfl(primitive_idx, current_lane);
     uint current_write_offset_coop =
@@ -315,10 +313,10 @@ __global__ void create_instances_cu(
 
     const uint remaining_instance_count =
         instance_count_coop - config::n_sequential_threshold;
-    const uint n_iterations = div_round_up(remaining_instance_count, warp_size);
+    const uint n_iterations = div_round_up(remaining_instance_count, config::warp_size);
     for (uint i = 0; i < n_iterations; i++) {
       const uint instance_idx =
-          i * warp_size + lane_idx + config::n_sequential_threshold;
+          i * config::warp_size + lane_idx + config::n_sequential_threshold;
       const uint tile_x =
           tile_bounds_coop.x + (instance_idx % tile_bounds_width_coop);
       const uint tile_y =
