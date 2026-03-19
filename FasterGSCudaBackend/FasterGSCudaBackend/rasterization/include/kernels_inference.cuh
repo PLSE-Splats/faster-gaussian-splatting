@@ -454,17 +454,20 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
       const uint subtile_hit_ballot = warp.ballot(subtile_hit);
 
       // Blend this warp batch.
-      for (int warp_batch_index = 0;
-           !done && warp_batch_index < config::warp_size; ++warp_batch_index) {
+      for (int warp_batch_index = batch_index;
+           !done && warp_batch_index < batch_index + config::warp_size;
+           ++warp_batch_index) {
         // Skip non-intersecting splat.
-        if ((subtile_hit_ballot >> warp_batch_index & 1u) == 0) continue;
+        if ((subtile_hit_ballot >> (warp_batch_index % config::warp_size) &
+             1u) == 0)
+          continue;
 
         // Evaluate current splat at pixel.
-        const auto render_index = batch_index + warp_batch_index;
-        const float4 conic_opacity = collected_conic_opacity[render_index];
+        const float4 conic_opacity = collected_conic_opacity[warp_batch_index];
         const auto [conic_x, conic_y, conic_z] = make_float3(conic_opacity);
         const float opacity = conic_opacity.w;
-        const auto [delta_x, delta_y] = collected_mean2d[render_index] - pixel;
+        const auto [delta_x, delta_y] =
+            collected_mean2d[warp_batch_index] - pixel;
         const float exponent = -0.5f * (conic_x * delta_x * delta_x +
                                         conic_z * delta_y * delta_y) -
                                conic_y * delta_x * delta_y;
@@ -476,7 +479,8 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
         if (alpha < config::min_alpha_threshold) continue;
 
         // blend fragment into pixel color
-        color_pixel += transmittance * alpha * collected_color[render_index];
+        color_pixel +=
+            transmittance * alpha * collected_color[warp_batch_index];
 
         // update transmittance
         transmittance *= 1.0f - alpha;
