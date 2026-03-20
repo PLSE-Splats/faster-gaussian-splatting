@@ -431,9 +431,6 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
       make_float2(__uint2float_rn(pixel_coords[3].x),
                   __uint2float_rn(pixel_coords[3].y)) +
           0.5f,
-      make_float2(__uint2float_rn(pixel_coords[4].x),
-                  __uint2float_rn(pixel_coords[4].y)) +
-          0.5f,
   };
 
   // Initialize local storage.
@@ -480,7 +477,7 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
     }
     block.sync();
     const int current_batch_size =
-        min(config::tile_size, n_instances_remaining);
+        min(config::block_size_blend, n_instances_remaining);
 
     // Work through this batch.
     for (int batch_index = 0; batch_index < current_batch_size;
