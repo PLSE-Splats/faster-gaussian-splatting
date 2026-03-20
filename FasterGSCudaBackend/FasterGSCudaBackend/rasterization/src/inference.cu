@@ -24,8 +24,8 @@ void faster_gs::rasterization::inference(
     const bool proper_antialiasing, const bool to_chw) {
   const dim3 tile_grid(div_round_up(width, config::tile_width),
                        div_round_up(height, config::tile_height), 1);
-  const dim3 block_grid(div_round_up(width, config::tile_width),
-                        div_round_up(height, config::tile_height), 1);
+  const dim3 block_grid(div_round_up(width, config::block_width_blend),
+                        div_round_up(height, config::block_height_blend), 1);
   constexpr dim3 block(config::block_width_blend, config::block_height_blend,
                        1);
   const int n_tiles = tile_grid.x * tile_grid.y;
@@ -158,7 +158,7 @@ void faster_gs::rasterization::rasterize(
       tile_buffers.instance_ranges,
       instance_buffers.primitive_indices.Current(), primitive_buffers.mean2d,
       primitive_buffers.screen_bounds, primitive_buffers.conic_opacity,
-      primitive_buffers.color, bg_color, image, width, height, block_grid.x,
+      primitive_buffers.color, bg_color, image, width, height, tile_grid.x,
       to_chw);
   CHECK_CUDA(config::debug, "blend")
 }
