@@ -452,9 +452,10 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
     const uint subtile_hit_ballot = warp.ballot(subtile_hit);
 
     // Work through this batch.
-    for (int j = 0; !done && j < current_batch_size; ++j) {
-      // Skip non-intersecting splat.
-      if ((subtile_hit_ballot >> j & 1u) == 0) continue;
+    uint pending_splats = subtile_hit_ballot;
+    while (!done && pending_splats != 0u) {
+      const int j = __ffs(pending_splats) - 1;
+      pending_splats &= pending_splats - 1;
 
       // Evaluate current splat at pixel.
       const float4 conic_opacity = collected_conic_opacity[j];
