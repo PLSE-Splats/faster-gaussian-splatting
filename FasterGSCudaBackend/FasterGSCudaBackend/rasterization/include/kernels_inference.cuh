@@ -382,10 +382,10 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
 
   // Create warp info.
   const auto warp = cg::tiled_partition<config::warp_size>(block);
-  const auto lane_index = warp.thread_rank();
-  const auto warp_index = warp.meta_group_rank();
-  const auto subtile_x = warp_index % config::subtile_per_row;
-  const auto subtile_y = warp_index / config::subtile_per_row;
+  const auto lane_rank = warp.thread_rank();
+  const auto warp_rank = warp.meta_group_rank();
+  const auto subtile_x = warp_rank % config::subtile_per_row;
+  const auto subtile_y = warp_rank / config::subtile_per_row;
   const auto subtile_origin_x =
       tile_origin_x + subtile_x * config::warp_tile_width;
   const auto subtile_origin_y =
@@ -397,8 +397,8 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
 
   // Compute pixel coordinates.
   const auto [pixel_coord_x, pixel_coord_y] =
-      make_uint2(subtile_origin_x + lane_index % config::warp_tile_width,
-                 subtile_origin_y + lane_index / config::warp_tile_width);
+      make_uint2(subtile_origin_x + lane_rank % config::warp_tile_width,
+                 subtile_origin_y + lane_rank / config::warp_tile_width);
   const bool inside = pixel_coord_x < width && pixel_coord_y < height;
   const float2 pixel = make_float2(__uint2float_rn(pixel_coord_x),
                                    __uint2float_rn(pixel_coord_y)) +
@@ -416,17 +416,19 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
   bool done = !inside;
 
   // Collaborative loading and processing.
-  const auto [tile_x, tile_y] =
+  const auto [tile_instance_index_start, tile_instance_index_end] =
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
-  for (int n_points_remaining = tile_y - tile_x,
-           current_fetch_idx = tile_x + thread_rank;
+  for (int n_points_remaining =
+               tile_instance_index_end - tile_instance_index_start,
+           current_fetch_idx = tile_instance_index_start + thread_rank;
        n_points_remaining > 0; n_points_remaining -= config::warp_fetch_size,
            current_fetch_idx += config::warp_fetch_size) {
     // Exit if all threads are done.
     if (__syncthreads_and(done)) break;
 
     // Fetch next batch into shared memory if thread is within fetch bounds.
-    if (current_fetch_idx < tile_y && thread_rank < config::warp_fetch_size) {
+    if (current_fetch_idx < tile_instance_index_end &&
+        thread_rank < config::warp_fetch_size) {
       const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
       collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
       collected_screen_bounds[thread_rank] =
@@ -447,9 +449,9 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
       // Subtile hit test and warp ballot broadcast result.
       bool subtile_hit = false;
       const auto fetch_base = warp_fetch_iterations * config::warp_size;
-      if (fetch_base + lane_index < current_batch_size) {
+      if (fetch_base + lane_rank < current_batch_size) {
         const auto [splat_left, splat_right, splat_top, splat_bottom] =
-            collected_screen_bounds[fetch_base + lane_index];
+            collected_screen_bounds[fetch_base + lane_rank];
         subtile_hit = splat_left < subtile_right &&
                       subtile_left < splat_right &&
                       splat_top < subtile_bottom && subtile_top < splat_bottom;
