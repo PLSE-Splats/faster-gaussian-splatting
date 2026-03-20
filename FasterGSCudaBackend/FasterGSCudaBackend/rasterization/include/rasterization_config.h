@@ -77,10 +77,11 @@ DEF int tile_size = tile_width * tile_height;
 DEF int n_sequential_threshold = 4;
 // warp size constants
 DEF uint warp_size = 32;
-DEF int warp_tile_width = 8;
-DEF int warp_tile_height = 4;
+DEF int warp_tile_width = tile_width / 2;
+DEF int warp_tile_height = tile_height / 4;
 DEF int subtile_per_row = tile_width / warp_tile_width;
-DEF int warp_cull_fetch_size = 32;
+DEF int warp_fetch_size = 32;
+DEF int pixels_per_thread = tile_size / block_size_blend;
 }  // namespace faster_gs::rasterization::config
 
 namespace config = faster_gs::rasterization::config;

@@ -37,9 +37,8 @@ namespace faster_gs::rasterization {
     template <typename KeyT>
     void rasterize(std::function<char*(size_t)>& resize_instance_buffers,
                    PrimitiveBuffers& primitive_buffers,
-                   TileBuffers& tile_buffers, const dim3& tile_grid,
-                   const dim3& block_grid, const dim3& block,
-                   const float3* bg_color, float* image,
+                   TileBuffers& tile_buffers, const dim3& grid,
+                   const dim3& block, const float3* bg_color, float* image,
                    const cudaStream_t memset_stream,
                    const int n_visible_primitives, const int n_instances,
                    const int end_bit, const int width, const int height,

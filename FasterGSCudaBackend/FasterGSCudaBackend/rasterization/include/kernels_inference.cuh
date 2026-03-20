@@ -381,10 +381,10 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
 
   // Create warp info.
   const auto warp = cg::tiled_partition<config::warp_size>(block);
-  const auto lane_index = warp.thread_rank();
-  const auto warp_index = warp.meta_group_rank();
-  const auto subtile_x = warp_index % config::subtile_per_row;
-  const auto subtile_y = warp_index / config::subtile_per_row;
+  const auto lane_rank = warp.thread_rank();
+  const auto warp_rank = warp.meta_group_rank();
+  const auto subtile_x = warp_rank % config::subtile_per_row;
+  const auto subtile_y = warp_rank / config::subtile_per_row;
   const auto subtile_origin_x =
       tile_origin_x + subtile_x * config::warp_tile_width;
   const auto subtile_origin_y =
@@ -394,36 +394,79 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
                    subtile_origin_y,
                    subtile_origin_y + config::warp_tile_height);
 
-  // Compute pixel coordinates.
-  const auto [pixel_coord_x, pixel_coord_y] =
-      make_uint2(subtile_origin_x + lane_index % config::warp_tile_width,
-                 subtile_origin_y + lane_index / config::warp_tile_width);
-  const bool inside = pixel_coord_x < width && pixel_coord_y < height;
-  const float2 pixel = make_float2(__uint2float_rn(pixel_coord_x),
-                                   __uint2float_rn(pixel_coord_y)) +
-                       0.5f;
-
   // Setup shared memory.
-  __shared__ float2 collected_mean2d[config::tile_size];
-  __shared__ ushort4 collected_screen_bounds[config::tile_size];
-  __shared__ float4 collected_conic_opacity[config::tile_size];
-  __shared__ float3 collected_color[config::tile_size];
+  __shared__ float2 collected_mean2d[config::block_size_blend];
+  __shared__ ushort4 collected_screen_bounds[config::block_size_blend];
+  __shared__ float4 collected_conic_opacity[config::block_size_blend];
+  __shared__ float3 collected_color[config::block_size_blend];
+
+  // Compute pixel coordinates.
+  const auto origin_pixel_coords =
+      make_uint2(subtile_origin_x + lane_rank * config::pixels_per_thread %
+                                        config::warp_tile_width,
+                 subtile_origin_y + lane_rank * config::pixels_per_thread /
+                                        config::warp_tile_width);
+  const uint2 pixel_coords[] = {
+      origin_pixel_coords,
+      origin_pixel_coords + make_uint2(1, 0),
+      origin_pixel_coords + make_uint2(2, 0),
+      origin_pixel_coords + make_uint2(3, 0),
+  };
+  const bool insides[] = {
+      pixel_coords[0].x < width && pixel_coords[0].y < height,
+      pixel_coords[1].x < width && pixel_coords[1].y < height,
+      pixel_coords[2].x < width && pixel_coords[2].y < height,
+      pixel_coords[3].x < width && pixel_coords[3].y < height,
+  };
+  const float2 pixels[] = {
+      make_float2(__uint2float_rn(pixel_coords[0].x),
+                  __uint2float_rn(pixel_coords[0].y)) +
+          0.5f,
+      make_float2(__uint2float_rn(pixel_coords[1].x),
+                  __uint2float_rn(pixel_coords[1].y)) +
+          0.5f,
+      make_float2(__uint2float_rn(pixel_coords[2].x),
+                  __uint2float_rn(pixel_coords[2].y)) +
+          0.5f,
+      make_float2(__uint2float_rn(pixel_coords[3].x),
+                  __uint2float_rn(pixel_coords[3].y)) +
+          0.5f,
+      make_float2(__uint2float_rn(pixel_coords[4].x),
+                  __uint2float_rn(pixel_coords[4].y)) +
+          0.5f,
+  };
 
   // Initialize local storage.
-  float3 color_pixel = make_float3(0.0f);
-  float transmittance = 1.0f;
-  bool done = !inside;
+  float3 pixel_colors[] = {
+      make_float3(0),
+      make_float3(0),
+      make_float3(0),
+      make_float3(0),
+  };
+  float transmittances[] = {
+      1.0f,
+      1.0f,
+      1.0f,
+      1.0f,
+  };
+  bool dones[] = {
+      !insides[0],
+      !insides[1],
+      !insides[2],
+      !insides[3],
+  };
 
   // Collaborative loading and processing.
   const auto [tile_instance_index_low, tile_instance_index_high] =
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
-  for (int n_points_remaining =
+  for (int n_instances_remaining =
                tile_instance_index_high - tile_instance_index_low,
            current_fetch_idx = tile_instance_index_low + thread_rank;
-       n_points_remaining > 0; n_points_remaining -= config::tile_size,
-           current_fetch_idx += config::tile_size) {
+       n_instances_remaining > 0;
+       n_instances_remaining -= config::block_size_blend,
+           current_fetch_idx += config::block_size_blend) {
     // Exit if all threads are done.
-    if (__syncthreads_and(done)) break;
+    if (__syncthreads_and(dones[0] && dones[1] && dones[2] && dones[3])) break;
 
     // Fetch next batch into shared memory if thread is within fetch bounds.
     if (current_fetch_idx < tile_instance_index_high) {
@@ -437,16 +480,16 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
     }
     block.sync();
     const int current_batch_size =
-        min(config::tile_size, n_points_remaining);
+        min(config::tile_size, n_instances_remaining);
 
     // Work through this batch.
     for (int batch_index = 0; batch_index < current_batch_size;
          batch_index += config::warp_size) {
       // Subtile hit test and warp ballot broadcast result.
       bool subtile_hit = false;
-      if (batch_index + lane_index < current_batch_size) {
+      if (batch_index + lane_rank < current_batch_size) {
         const auto [splat_left, splat_right, splat_top, splat_bottom] =
-            collected_screen_bounds[batch_index + lane_index];
+            collected_screen_bounds[batch_index + lane_rank];
         subtile_hit = splat_left < subtile_right &&
                       subtile_left < splat_right &&
                       splat_top < subtile_bottom && subtile_top < splat_bottom;
@@ -455,58 +498,74 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
 
       // Blend this warp batch.
       for (int warp_batch_index = batch_index;
-           !done && warp_batch_index < batch_index + config::warp_size;
+           !dones[0] && !dones[1] && !dones[2] && !dones[3] &&
+           warp_batch_index < batch_index + config::warp_size;
            ++warp_batch_index) {
         // Skip non-intersecting splat.
         if ((subtile_hit_ballot >> (warp_batch_index % config::warp_size) &
              1u) == 0)
           continue;
 
-        // Evaluate current splat at pixel.
-        const float4 conic_opacity = collected_conic_opacity[warp_batch_index];
+        // Pull splat from shared.
+        const auto conic_opacity = collected_conic_opacity[warp_batch_index];
         const auto [conic_x, conic_y, conic_z] = make_float3(conic_opacity);
-        const float opacity = conic_opacity.w;
-        const auto [delta_x, delta_y] =
-            collected_mean2d[warp_batch_index] - pixel;
-        const float exponent = -0.5f * (conic_x * delta_x * delta_x +
-                                        conic_z * delta_y * delta_y) -
-                               conic_y * delta_x * delta_y;
-        const float gaussian = expf(fminf(exponent, 0.0f));
-        if constexpr (!config::original_opacity_interpretation &&
-                      gaussian < config::min_alpha_threshold)
-          continue;
-        const float alpha = opacity * gaussian;
-        if (alpha < config::min_alpha_threshold) continue;
+        const auto opacity = conic_opacity.w;
+        const auto mean2d = collected_mean2d[warp_batch_index];
+        const auto color = collected_color[warp_batch_index];
 
-        // blend fragment into pixel color
-        color_pixel +=
-            transmittance * alpha * collected_color[warp_batch_index];
+        for (int thread_pixel_index = 0;
+             thread_pixel_index < config::pixels_per_thread;
+             ++thread_pixel_index) {
+          // Evaluate current splat at pixel.
+          const auto [delta_x, delta_y] = mean2d - pixels[thread_pixel_index];
+          const float exponent = -0.5f * (conic_x * delta_x * delta_x +
+                                          conic_z * delta_y * delta_y) -
+                                 conic_y * delta_x * delta_y;
+          const float gaussian = expf(fminf(exponent, 0.0f));
+          if constexpr (!config::original_opacity_interpretation &&
+                        gaussian < config::min_alpha_threshold)
+            continue;
+          const float alpha = opacity * gaussian;
+          if (alpha < config::min_alpha_threshold) continue;
 
-        // update transmittance
-        transmittance *= 1.0f - alpha;
+          // blend fragment into pixel color
+          pixel_colors[thread_pixel_index] +=
+              transmittances[thread_pixel_index] * alpha * color;
 
-        // early stopping
-        if (transmittance < config::transmittance_threshold) {
-          done = true;
+          // update transmittance
+          transmittances[thread_pixel_index] *= 1.0f - alpha;
+
+          // early stopping
+          if (transmittances[thread_pixel_index] <
+              config::transmittance_threshold) {
+            dones[thread_pixel_index] = true;
+          }
         }
       }
     }
   }
-  if (inside) {
-    // apply background color
-    color_pixel += transmittance * bg_color[0];
-    // store results
-    const uint pixel_idx = width * pixel_coord_y + pixel_coord_x;
-    if (output_chw) {
-      const uint n_pixels = width * height;
-      image[pixel_idx] = __saturatef(color_pixel.x);
-      image[n_pixels + pixel_idx] = __saturatef(color_pixel.y);
-      image[2 * n_pixels + pixel_idx] = __saturatef(color_pixel.z);
-    } else {
-      const uint base_idx = 3 * pixel_idx;
-      image[base_idx] = __saturatef(color_pixel.x);
-      image[base_idx + 1] = __saturatef(color_pixel.y);
-      image[base_idx + 2] = __saturatef(color_pixel.z);
+  for (int thread_pixel_index = 0;
+       thread_pixel_index < config::pixels_per_thread; ++thread_pixel_index) {
+    if (insides[thread_pixel_index]) {
+      // apply background color
+      pixel_colors[thread_pixel_index] +=
+          transmittances[thread_pixel_index] * bg_color[0];
+      // store results
+      const uint pixel_idx = width * pixel_coords[thread_pixel_index].y +
+                             pixel_coords[thread_pixel_index].x;
+      if (output_chw) {
+        const uint n_pixels = width * height;
+        image[pixel_idx] = __saturatef(pixel_colors[thread_pixel_index].x);
+        image[n_pixels + pixel_idx] =
+            __saturatef(pixel_colors[thread_pixel_index].y);
+        image[2 * n_pixels + pixel_idx] =
+            __saturatef(pixel_colors[thread_pixel_index].z);
+      } else {
+        const uint base_idx = 3 * pixel_idx;
+        image[base_idx] = __saturatef(pixel_colors[thread_pixel_index].x);
+        image[base_idx + 1] = __saturatef(pixel_colors[thread_pixel_index].y);
+        image[base_idx + 2] = __saturatef(pixel_colors[thread_pixel_index].z);
+      }
     }
   }
 }
