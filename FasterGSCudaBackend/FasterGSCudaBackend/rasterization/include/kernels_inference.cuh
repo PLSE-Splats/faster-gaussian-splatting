@@ -375,8 +375,14 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
   // Get tile info.
   const auto block = cg::this_thread_block();
   const auto group_index = block.group_index();
-  const auto tile_origin_x = group_index.x * config::tile_width;
-  const auto tile_origin_y = group_index.y * config::tile_height;
+  const auto [tile_x, tile_y] =
+      make_uint2(group_index.x / config::blocks_per_tile_row,
+                 group_index.y / config::blocks_per_tile_column);
+  const auto [tile_origin_x, tile_origin_y] =
+      make_uint2(tile_x * config::tile_width, tile_y * config::tile_height);
+  const auto [tile_left, tile_right, tile_top, tile_bottom] =
+      make_ushort4(tile_origin_x, tile_origin_x + config::tile_width,
+                   tile_origin_y, tile_origin_y + config::tile_height);
   const uint thread_rank = block.thread_rank();
 
   // Create warp info.
@@ -404,10 +410,12 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
                        0.5f;
 
   // Setup shared memory.
-  __shared__ float2 collected_mean2d[config::tile_size];
-  __shared__ ushort4 collected_screen_bounds[config::tile_size];
-  __shared__ float4 collected_conic_opacity[config::tile_size];
-  __shared__ float3 collected_color[config::tile_size];
+  __shared__ bool collected_hit[config::block_size_blend];
+  __shared__ ushort4 collected_screen_bounds[config::block_size_blend];
+
+  __shared__ float2 collected_mean2d[config::block_size_blend];
+  __shared__ float4 collected_conic_opacity[config::block_size_blend];
+  __shared__ float3 collected_color[config::block_size_blend];
 
   // Initialize local storage.
   float3 color_pixel = make_float3(0.0f);
@@ -416,35 +424,49 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
 
   // Collaborative loading and processing.
   const auto [tile_instance_index_low, tile_instance_index_high] =
-      tile_instance_ranges[group_index.y * grid_width + group_index.x];
+      tile_instance_ranges[tile_y * grid_width + tile_x];
   for (int n_points_remaining =
                tile_instance_index_high - tile_instance_index_low,
            current_fetch_idx = tile_instance_index_low + thread_rank;
-       n_points_remaining > 0; n_points_remaining -= config::tile_size,
-           current_fetch_idx += config::tile_size) {
+       n_points_remaining > 0; n_points_remaining -= config::block_size_blend,
+           current_fetch_idx += config::block_size_blend) {
     // Exit if all threads are done.
     if (__syncthreads_and(done)) break;
 
-    // Fetch next batch into shared memory if thread is within fetch bounds.
+    // Reset hits.
+    collected_hit[thread_rank] = false;
+
+    // Fetch next batch into shared memory as a block.
     if (current_fetch_idx < tile_instance_index_high) {
+      // Tile hit check this splat.
       const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
-      collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
-      collected_screen_bounds[thread_rank] =
-          primitive_screen_bounds[primitive_idx];
-      collected_conic_opacity[thread_rank] =
-          primitive_conic_opacity[primitive_idx];
-      collected_color[thread_rank] = primitive_color[primitive_idx];
+      const auto splat_bounds = primitive_screen_bounds[primitive_idx];
+      const auto hit =
+          splat_bounds.x < tile_right && tile_left < splat_bounds.y &&
+          splat_bounds.z < tile_bottom && splat_bounds.w < tile_top;
+
+      // Collect on hit.
+      if (hit) {
+        collected_hit[thread_rank] = true;
+        collected_screen_bounds[thread_rank] = splat_bounds;
+
+        collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
+        collected_conic_opacity[thread_rank] =
+            primitive_conic_opacity[primitive_idx];
+        collected_color[thread_rank] = primitive_color[primitive_idx];
+      }
     }
     block.sync();
-    const int current_batch_size =
-        min(config::tile_size, n_points_remaining);
 
-    // Work through this batch.
+    // Work through this batch as a warp.
+    const int current_batch_size =
+        min(config::block_size_blend, n_points_remaining);
     for (int batch_index = 0; batch_index < current_batch_size;
          batch_index += config::warp_size) {
       // Subtile hit test and warp ballot broadcast result.
       bool subtile_hit = false;
-      if (batch_index + lane_index < current_batch_size) {
+      if (batch_index + lane_index < current_batch_size &&
+          collected_hit[batch_index + lane_index]) {
         const auto [splat_left, splat_right, splat_top, splat_bottom] =
             collected_screen_bounds[batch_index + lane_index];
         subtile_hit = splat_left < subtile_right &&
