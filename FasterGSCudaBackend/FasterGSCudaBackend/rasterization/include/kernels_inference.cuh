@@ -405,10 +405,10 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
                        0.5f;
 
   // Setup shared memory.
-  __shared__ float2 collected_mean2d[config::warp_cull_fetch_size];
-  __shared__ ushort4 collected_screen_bounds[config::warp_cull_fetch_size];
-  __shared__ float4 collected_conic_opacity[config::warp_cull_fetch_size];
-  __shared__ float3 collected_color[config::warp_cull_fetch_size];
+  __shared__ float2 collected_mean2d[config::warp_fetch_size];
+  __shared__ ushort4 collected_screen_bounds[config::warp_fetch_size];
+  __shared__ float4 collected_conic_opacity[config::warp_fetch_size];
+  __shared__ float3 collected_color[config::warp_fetch_size];
 
   // Initialize local storage.
   float3 color_pixel = make_float3(0.0f);
@@ -420,15 +420,13 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
   for (int n_points_remaining = tile_y - tile_x,
            current_fetch_idx = tile_x + thread_rank;
-       n_points_remaining > 0;
-       n_points_remaining -= config::warp_cull_fetch_size,
-           current_fetch_idx += config::warp_cull_fetch_size) {
+       n_points_remaining > 0; n_points_remaining -= config::warp_fetch_size,
+           current_fetch_idx += config::warp_fetch_size) {
     // Exit if all threads are done.
     if (__syncthreads_and(done)) break;
 
     // Fetch next batch into shared memory if thread is within fetch bounds.
-    if (current_fetch_idx < tile_y &&
-        thread_rank < config::warp_cull_fetch_size) {
+    if (current_fetch_idx < tile_y && thread_rank < config::warp_fetch_size) {
       const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
       collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
       collected_screen_bounds[thread_rank] =
@@ -439,48 +437,57 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
     }
     block.sync();
     const int current_batch_size =
-        min(config::warp_cull_fetch_size, n_points_remaining);
+        min(config::warp_fetch_size, n_points_remaining);
 
-    // Subtile hit test and warp ballot broadcast result.
-    bool subtile_hit = false;
-    if (lane_index < current_batch_size) {
-      const auto [splat_left, splat_right, splat_top, splat_bottom] =
-          collected_screen_bounds[lane_index];
-      subtile_hit = splat_left < subtile_right && subtile_left < splat_right &&
-                    splat_top < subtile_bottom && subtile_top < splat_bottom;
-    }
-    const uint subtile_hit_ballot = warp.ballot(subtile_hit);
+    // Iterate through the fetch.
+#pragma unroll
+    for (int warp_fetch_iterations = 0;
+         warp_fetch_iterations < config::warp_fetch_size / config::warp_size;
+         ++warp_fetch_iterations) {
+      // Subtile hit test and warp ballot broadcast result.
+      bool subtile_hit = false;
+      const auto fetch_base = warp_fetch_iterations * config::warp_size;
+      if (fetch_base + lane_index < current_batch_size) {
+        const auto [splat_left, splat_right, splat_top, splat_bottom] =
+            collected_screen_bounds[fetch_base + lane_index];
+        subtile_hit = splat_left < subtile_right &&
+                      subtile_left < splat_right &&
+                      splat_top < subtile_bottom && subtile_top < splat_bottom;
+      }
+      const uint subtile_hit_ballot = warp.ballot(subtile_hit);
 
-    // Work through this batch.
-    uint pending_splats = subtile_hit_ballot;
-    while (!done && pending_splats != 0u) {
-      const int j = __ffs(static_cast<int>(pending_splats)) - 1;
-      pending_splats &= pending_splats - 1;
+      // Work through this batch.
+      uint pending_splats = subtile_hit_ballot;
+      while (!done && pending_splats != 0u) {
+        const int j = __ffs(static_cast<int>(pending_splats)) - 1;
+        pending_splats &= pending_splats - 1;
 
-      // Evaluate current splat at pixel.
-      const float4 conic_opacity = collected_conic_opacity[j];
-      const auto [conic_x, conic_y, conic_z] = make_float3(conic_opacity);
-      const float opacity = conic_opacity.w;
-      const auto [delta_x, delta_y] = collected_mean2d[j] - pixel;
-      const float exponent =
-          -0.5f * (conic_x * delta_x * delta_x + conic_z * delta_y * delta_y) -
-          conic_y * delta_x * delta_y;
-      const float gaussian = expf(fminf(exponent, 0.0f));
-      if constexpr (!config::original_opacity_interpretation &&
-                    gaussian < config::min_alpha_threshold)
-        continue;
-      const float alpha = opacity * gaussian;
-      if (alpha < config::min_alpha_threshold) continue;
+        // Evaluate current splat at pixel.
+        const float4 conic_opacity = collected_conic_opacity[fetch_base + j];
+        const auto [conic_x, conic_y, conic_z] = make_float3(conic_opacity);
+        const float opacity = conic_opacity.w;
+        const auto [delta_x, delta_y] =
+            collected_mean2d[fetch_base + j] - pixel;
+        const float exponent = -0.5f * (conic_x * delta_x * delta_x +
+                                        conic_z * delta_y * delta_y) -
+                               conic_y * delta_x * delta_y;
+        const float gaussian = expf(fminf(exponent, 0.0f));
+        if constexpr (!config::original_opacity_interpretation &&
+                      gaussian < config::min_alpha_threshold)
+          continue;
+        const float alpha = opacity * gaussian;
+        if (alpha < config::min_alpha_threshold) continue;
 
-      // blend fragment into pixel color
-      color_pixel += transmittance * alpha * collected_color[j];
+        // blend fragment into pixel color
+        color_pixel += transmittance * alpha * collected_color[fetch_base + j];
 
-      // update transmittance
-      transmittance *= 1.0f - alpha;
+        // update transmittance
+        transmittance *= 1.0f - alpha;
 
-      // early stopping
-      if (transmittance < config::transmittance_threshold) {
-        done = true;
+        // early stopping
+        if (transmittance < config::transmittance_threshold) {
+          done = true;
+        }
       }
     }
   }

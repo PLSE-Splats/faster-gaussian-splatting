@@ -1,7 +1,5 @@
 #pragma once
 
-#include "helper_math.h"
-
 #define DEF inline constexpr
 
 namespace faster_gs::rasterization::config {
@@ -76,7 +74,7 @@ DEF int warp_size = 32;
 DEF int warp_tile_width = 8;
 DEF int warp_tile_height = 4;
 DEF int subtile_per_row = tile_width / warp_tile_width;
-DEF int warp_cull_fetch_size = 32;
+DEF int warp_fetch_size = warp_size * 2;
 }  // namespace faster_gs::rasterization::config
 
 namespace config = faster_gs::rasterization::config;
