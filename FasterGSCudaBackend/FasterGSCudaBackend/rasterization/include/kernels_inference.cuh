@@ -454,7 +454,7 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
     // Work through this batch.
     uint pending_splats = subtile_hit_ballot;
     while (!done && pending_splats != 0u) {
-      const int j = __ffs(pending_splats) - 1;
+      const int j = __ffs(static_cast<int>(pending_splats)) - 1;
       pending_splats &= pending_splats - 1;
 
       // Evaluate current splat at pixel.
