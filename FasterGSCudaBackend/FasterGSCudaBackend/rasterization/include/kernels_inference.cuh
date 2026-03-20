@@ -363,13 +363,31 @@ __global__ void extract_instance_ranges_cu(
     tile_instance_ranges[instance_tile_idx].y = n_instances;
 }
 
+__global__ inline void stage_instance_data_cu(
+    const uint* __restrict__ instance_primitive_indices,
+    const ushort4* __restrict__ primitive_screen_bounds,
+    const float2* __restrict__ primitive_mean2d,
+    const float4* __restrict__ primitive_conic_opacity,
+    const float3* __restrict__ primitive_color,
+    ushort4* __restrict__ instance_screen_bounds,
+    float2* __restrict__ instance_mean2d,
+    float4* __restrict__ instance_conic_opacity,
+    float3* __restrict__ instance_color, const uint n_instances) {
+  const uint instance_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (instance_idx >= n_instances) return;
+  const uint primitive_idx = instance_primitive_indices[instance_idx];
+  instance_screen_bounds[instance_idx] = primitive_screen_bounds[primitive_idx];
+  instance_mean2d[instance_idx] = primitive_mean2d[primitive_idx];
+  instance_conic_opacity[instance_idx] = primitive_conic_opacity[primitive_idx];
+  instance_color[instance_idx] = primitive_color[primitive_idx];
+}
+
 __global__ inline void __launch_bounds__(config::block_size_blend)
     blend_cu(const uint2* __restrict__ tile_instance_ranges,
-             const uint* __restrict__ instance_primitive_indices,
-             const float2* __restrict__ primitive_mean2d,
-             const ushort4* __restrict__ primitive_screen_bounds,
-             const float4* __restrict__ primitive_conic_opacity,
-             const float3* __restrict__ primitive_color,
+             const ushort4* __restrict__ instance_screen_bounds,
+             const float2* __restrict__ instance_mean2d,
+             const float4* __restrict__ instance_conic_opacity,
+             const float3* __restrict__ instance_color,
              const float3* __restrict__ bg_color, float* __restrict__ image,
              const uint width, const uint height, const uint grid_width,
              const bool output_chw) {
@@ -405,8 +423,8 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
                        0.5f;
 
   // Setup shared memory.
-  __shared__ float2 collected_mean2d[config::warp_cull_fetch_size];
   __shared__ ushort4 collected_screen_bounds[config::warp_cull_fetch_size];
+  __shared__ float2 collected_mean2d[config::warp_cull_fetch_size];
   __shared__ float4 collected_conic_opacity[config::warp_cull_fetch_size];
   __shared__ float3 collected_color[config::warp_cull_fetch_size];
 
@@ -416,10 +434,12 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
   bool done = !inside;
 
   // Collaborative loading and processing.
-  const auto [tile_x, tile_y] =
+  const auto [tile_instance_index_start, tile_instance_index_end] =
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
-  for (int n_points_remaining = tile_y - tile_x,
-           current_fetch_idx = tile_x + thread_rank;
+  for (int n_points_remaining = static_cast<int>(tile_instance_index_end -
+                                                 tile_instance_index_start),
+           current_fetch_idx =
+               static_cast<int>(tile_instance_index_start + thread_rank);
        n_points_remaining > 0;
        n_points_remaining -= config::warp_cull_fetch_size,
            current_fetch_idx += config::warp_cull_fetch_size) {
@@ -427,15 +447,14 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
     if (__syncthreads_and(done)) break;
 
     // Fetch next batch into shared memory if thread is within fetch bounds.
-    if (current_fetch_idx < tile_y &&
+    if (current_fetch_idx < tile_instance_index_end &&
         thread_rank < config::warp_cull_fetch_size) {
-      const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
-      collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
       collected_screen_bounds[thread_rank] =
-          primitive_screen_bounds[primitive_idx];
+          instance_screen_bounds[current_fetch_idx];
+      collected_mean2d[thread_rank] = instance_mean2d[current_fetch_idx];
       collected_conic_opacity[thread_rank] =
-          primitive_conic_opacity[primitive_idx];
-      collected_color[thread_rank] = primitive_color[primitive_idx];
+          instance_conic_opacity[current_fetch_idx];
+      collected_color[thread_rank] = instance_color[current_fetch_idx];
     }
     block.sync();
     const int current_batch_size =
