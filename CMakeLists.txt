@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 4.2)
 project(FasterGS CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories(FasterGSCudaBackend/FasterGSCudaBackend/adam/include)
 include_directories(FasterGSCudaBackend/FasterGSCudaBackend/densification/include)
