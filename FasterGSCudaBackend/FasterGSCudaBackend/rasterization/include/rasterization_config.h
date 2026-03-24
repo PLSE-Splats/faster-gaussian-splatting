@@ -75,6 +75,7 @@ DEF int warp_tile_width = 8;
 DEF int warp_tile_height = 4;
 DEF int subtile_per_row = tile_width / warp_tile_width;
 DEF int warp_fetch_size = warp_size * 5;
+DEF int blend_prefetch_num_stages = 2;
 }  // namespace faster_gs::rasterization::config
 
 namespace config = faster_gs::rasterization::config;

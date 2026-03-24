@@ -2,6 +2,8 @@
 
 #include <cooperative_groups.h>
 
+#include <cuda/pipeline>
+
 #include "buffer_utils.h"
 #include "helper_math.h"
 #include "kernel_utils.cuh"
@@ -405,10 +407,13 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
                        0.5f;
 
   // Setup shared memory.
-  __shared__ float2 collected_mean2d[config::warp_fetch_size];
-  __shared__ ushort4 collected_screen_bounds[config::warp_fetch_size];
-  __shared__ float4 collected_conic_opacity[config::warp_fetch_size];
-  __shared__ float3 collected_color[config::warp_fetch_size];
+  constexpr int num_stages = config::blend_prefetch_num_stages;
+  static_assert(num_stages > 0, "blend prefetch pipeline must have stages");
+  constexpr int stage_fetch_size = config::warp_fetch_size;
+  __shared__ float2 collected_mean2d[num_stages * stage_fetch_size];
+  __shared__ ushort4 collected_screen_bounds[num_stages * stage_fetch_size];
+  __shared__ float4 collected_conic_opacity[num_stages * stage_fetch_size];
+  __shared__ float3 collected_color[num_stages * stage_fetch_size];
 
   // Initialize local storage.
   float3 color_pixel = make_float3(0.0f);
@@ -418,40 +423,60 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
   // Collaborative loading and processing.
   const auto [tile_instance_index_start, tile_instance_index_end] =
       tile_instance_ranges[group_index.y * grid_width + group_index.x];
-  for (int n_points_remaining =
-               tile_instance_index_end - tile_instance_index_start,
-           current_fetch_idx = tile_instance_index_start + thread_rank;
-       n_points_remaining > 0; n_points_remaining -= config::warp_fetch_size,
-           current_fetch_idx += config::warp_fetch_size) {
-    // Exit if all threads are done.
-    if (__syncthreads_and(done)) break;
+  const int n_points_total =
+      tile_instance_index_end - tile_instance_index_start;
+  const int n_batches_total =
+      (n_points_total + stage_fetch_size - 1) / stage_fetch_size;
+  cuda::pipeline<cuda::thread_scope_thread> pipeline = cuda::make_pipeline();
+  auto fetch_batch_to_stage = [&](const int batch_idx, const int stage_idx) {
+    if (batch_idx >= n_batches_total || thread_rank >= stage_fetch_size) return;
+    const int current_fetch_idx =
+        tile_instance_index_start + batch_idx * stage_fetch_size + thread_rank;
+    if (current_fetch_idx >= tile_instance_index_end) return;
+    const int shared_idx = stage_idx * stage_fetch_size + thread_rank;
+    const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
+    cuda::memcpy_async(&collected_mean2d[shared_idx],
+                       &primitive_mean2d[primitive_idx], sizeof(float2),
+                       pipeline);
+    cuda::memcpy_async(&collected_screen_bounds[shared_idx],
+                       &primitive_screen_bounds[primitive_idx], sizeof(ushort4),
+                       pipeline);
+    cuda::memcpy_async(&collected_conic_opacity[shared_idx],
+                       &primitive_conic_opacity[primitive_idx], sizeof(float4),
+                       pipeline);
+    cuda::memcpy_async(&collected_color[shared_idx],
+                       &primitive_color[primitive_idx], sizeof(float3),
+                       pipeline);
+  };
 
-    // Fetch next batch into shared memory if thread is within fetch bounds.
-    if (current_fetch_idx < tile_instance_index_end &&
-        thread_rank < config::warp_fetch_size) {
-      const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
-      collected_mean2d[thread_rank] = primitive_mean2d[primitive_idx];
-      collected_screen_bounds[thread_rank] =
-          primitive_screen_bounds[primitive_idx];
-      collected_conic_opacity[thread_rank] =
-          primitive_conic_opacity[primitive_idx];
-      collected_color[thread_rank] = primitive_color[primitive_idx];
-    }
+  // Prime the pipeline.
+  for (int stage_idx = 0; stage_idx < num_stages; ++stage_idx) {
+    pipeline.producer_acquire();
+    fetch_batch_to_stage(stage_idx, stage_idx);
+    pipeline.producer_commit();
+  }
+
+  int stage_idx = 0;
+  for (int compute_batch = 0, fetch_batch = num_stages;
+       compute_batch < n_batches_total; ++compute_batch, ++fetch_batch) {
+    constexpr int pending_stages = num_stages - 1;
+    cuda::pipeline_consumer_wait_prior<pending_stages>(pipeline);
     block.sync();
-    const int current_batch_size =
-        min(config::warp_fetch_size, n_points_remaining);
+    const int current_batch_size = min(
+        stage_fetch_size, n_points_total - compute_batch * stage_fetch_size);
+    const int stage_offset = stage_idx * stage_fetch_size;
 
     // Iterate through the fetch.
 #pragma unroll
     for (int warp_fetch_iterations = 0;
-         warp_fetch_iterations < config::warp_fetch_size / config::warp_size;
+         warp_fetch_iterations < stage_fetch_size / config::warp_size;
          ++warp_fetch_iterations) {
       // Subtile hit test and warp ballot broadcast result.
       bool subtile_hit = false;
       const auto fetch_base = warp_fetch_iterations * config::warp_size;
       if (fetch_base + lane_rank < current_batch_size) {
         const auto [splat_left, splat_right, splat_top, splat_bottom] =
-            collected_screen_bounds[fetch_base + lane_rank];
+            collected_screen_bounds[stage_offset + fetch_base + lane_rank];
         subtile_hit = splat_left < subtile_right &&
                       subtile_left < splat_right &&
                       splat_top < subtile_bottom && subtile_top < splat_bottom;
@@ -465,11 +490,12 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
         pending_splats &= pending_splats - 1;
 
         // Evaluate current splat at pixel.
-        const float4 conic_opacity = collected_conic_opacity[fetch_base + j];
+        const float4 conic_opacity =
+            collected_conic_opacity[stage_offset + fetch_base + j];
         const auto [conic_x, conic_y, conic_z] = make_float3(conic_opacity);
         const float opacity = conic_opacity.w;
         const auto [delta_x, delta_y] =
-            collected_mean2d[fetch_base + j] - pixel;
+            collected_mean2d[stage_offset + fetch_base + j] - pixel;
         const float exponent = -0.5f * (conic_x * delta_x * delta_x +
                                         conic_z * delta_y * delta_y) -
                                conic_y * delta_x * delta_y;
@@ -481,7 +507,8 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
         if (alpha < config::min_alpha_threshold) continue;
 
         // blend fragment into pixel color
-        color_pixel += transmittance * alpha * collected_color[fetch_base + j];
+        color_pixel += transmittance * alpha *
+                       collected_color[stage_offset + fetch_base + j];
 
         // update transmittance
         transmittance *= 1.0f - alpha;
@@ -492,6 +519,17 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
         }
       }
     }
+
+    pipeline.consumer_release();
+
+    // Exit if all threads are done.
+    if (__syncthreads_and(done)) break;
+
+    // Fetch the next stage.
+    pipeline.producer_acquire();
+    fetch_batch_to_stage(fetch_batch, stage_idx);
+    pipeline.producer_commit();
+    stage_idx = (stage_idx + 1) % num_stages;
   }
   if (inside) {
     // apply background color
