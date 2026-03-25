@@ -14,6 +14,21 @@ namespace cg = cooperative_groups;
 
 namespace faster_gs::rasterization::kernels::inference {
 
+__device__ __forceinline__ uint pack_bounds_xy(ushort min_bound,
+                                               ushort max_bound) {
+  return static_cast<uint>(min_bound) | (static_cast<uint>(max_bound) << 16);
+}
+
+__device__ __forceinline__ ushort4 unpack_screen_bounds_from_geometry(
+    const float4 geometry_record) {
+  const uint packed_x = __float_as_uint(geometry_record.z);
+  const uint packed_y = __float_as_uint(geometry_record.w);
+  return make_ushort4(static_cast<ushort>(packed_x & 0xFFFFu),
+                      static_cast<ushort>((packed_x >> 16) & 0xFFFFu),
+                      static_cast<ushort>(packed_y & 0xFFFFu),
+                      static_cast<ushort>((packed_y >> 16) & 0xFFFFu));
+}
+
 __global__ void preprocess_cu(
     const float3* __restrict__ means, const float3* __restrict__ scales,
     const float4* __restrict__ rotations, const float* __restrict__ opacities,
@@ -23,10 +38,9 @@ __global__ void preprocess_cu(
     uint* __restrict__ primitive_depth_keys,
     uint* __restrict__ primitive_indices,
     uint* __restrict__ primitive_n_touched_tiles,
-    ushort4* __restrict__ primitive_screen_bounds,
-    float2* __restrict__ primitive_mean2d,
+    float4* __restrict__ primitive_geometry,
     float4* __restrict__ primitive_conic_opacity,
-    float3* __restrict__ primitive_color,
+    float4* __restrict__ primitive_color,
     uint* __restrict__ n_visible_primitives, uint* __restrict__ n_instances,
     const uint n_primitives, const uint grid_width, const uint grid_height,
     const uint active_sh_bases, const uint total_sh_bases, const float width,
@@ -183,13 +197,15 @@ __global__ void preprocess_cu(
 
   // store results
   primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
-  primitive_screen_bounds[primitive_idx] = screen_bounds;
-  primitive_mean2d[primitive_idx] = mean2d;
+  primitive_geometry[primitive_idx] =
+      make_float4(mean2d.x, mean2d.y,
+                  __uint_as_float(pack_bounds_xy(screen_bounds.x, screen_bounds.y)),
+                  __uint_as_float(pack_bounds_xy(screen_bounds.z, screen_bounds.w)));
   primitive_conic_opacity[primitive_idx] = make_float4(conic, opacity);
   const float3 color = convert_sh_to_color(
       sh_coefficients_0, sh_coefficients_rest, mean3d, cam_position[0],
       primitive_idx, active_sh_bases, total_sh_bases);
-  primitive_color[primitive_idx] = fmaxf(color, 0.0f);
+  primitive_color[primitive_idx] = make_float4(fmaxf(color, 0.0f), 0.0f);
 
   const uint offset = atomicAdd(n_visible_primitives, 1);
   const uint depth_key = __float_as_uint(depth);
@@ -214,8 +230,7 @@ template <typename KeyT>
 __global__ void create_instances_cu(
     const uint* __restrict__ primitive_indices_sorted,
     const uint* __restrict__ primitive_offsets,
-    const ushort4* __restrict__ primitive_screen_bounds,
-    const float2* __restrict__ primitive_mean2d,
+    const float4* __restrict__ primitive_geometry,
     const float4* __restrict__ primitive_conic_opacity,
     KeyT* __restrict__ instance_keys,
     uint* __restrict__ instance_primitive_indices, const uint grid_width,
@@ -241,7 +256,9 @@ __global__ void create_instances_cu(
 
   const uint primitive_idx = primitive_indices_sorted[original_idx];
 
-  const ushort4 screen_bounds = primitive_screen_bounds[primitive_idx];
+  const float4 geometry_record = primitive_geometry[primitive_idx];
+  const ushort4 screen_bounds =
+      unpack_screen_bounds_from_geometry(geometry_record);
   const ushort4 tile_bounds = make_ushort4(
       screen_bounds.x / config::tile_width,
       __float2int_ru(static_cast<float>(screen_bounds.y) / config::tile_width),
@@ -251,7 +268,7 @@ __global__ void create_instances_cu(
   const uint tile_bounds_width = tile_bounds.y - tile_bounds.x;
   const uint instance_count =
       (tile_bounds.w - tile_bounds.z) * tile_bounds_width;
-  const float2 mean2d = primitive_mean2d[primitive_idx];
+  const float2 mean2d = make_float2(geometry_record.x, geometry_record.y);
   const float2 mean2d_shifted = mean2d - 0.5f;
   const float4 conic_opacity = primitive_conic_opacity[primitive_idx];
   const float3 conic = make_float3(conic_opacity);
@@ -368,10 +385,9 @@ __global__ void extract_instance_ranges_cu(
 __global__ inline void __launch_bounds__(config::block_size_blend)
     blend_cu(const uint2* __restrict__ tile_instance_ranges,
              const uint* __restrict__ instance_primitive_indices,
-             const float2* __restrict__ primitive_mean2d,
-             const ushort4* __restrict__ primitive_screen_bounds,
+             const float4* __restrict__ primitive_geometry,
              const float4* __restrict__ primitive_conic_opacity,
-             const float3* __restrict__ primitive_color,
+             const float4* __restrict__ primitive_color,
              const float3* __restrict__ bg_color, float* __restrict__ image,
              const uint width, const uint height, const uint grid_width,
              const bool output_chw) {
@@ -410,10 +426,9 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
   constexpr int num_stages = config::blend_prefetch_num_stages;
   static_assert(num_stages > 0, "blend prefetch pipeline must have stages");
   constexpr int stage_fetch_size = config::warp_fetch_size;
-  __shared__ float2 collected_mean2d[num_stages * stage_fetch_size];
-  __shared__ ushort4 collected_screen_bounds[num_stages * stage_fetch_size];
+  __shared__ float4 collected_geometry[num_stages * stage_fetch_size];
   __shared__ float4 collected_conic_opacity[num_stages * stage_fetch_size];
-  __shared__ float3 collected_color[num_stages * stage_fetch_size];
+  __shared__ float4 collected_color[num_stages * stage_fetch_size];
 
   // Initialize local storage.
   float3 color_pixel = make_float3(0.0f);
@@ -435,17 +450,14 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
     if (current_fetch_idx >= tile_instance_index_end) return;
     const int shared_idx = stage_idx * stage_fetch_size + thread_rank;
     const uint primitive_idx = instance_primitive_indices[current_fetch_idx];
-    cuda::memcpy_async(&collected_mean2d[shared_idx],
-                       &primitive_mean2d[primitive_idx], sizeof(float2),
-                       pipeline);
-    cuda::memcpy_async(&collected_screen_bounds[shared_idx],
-                       &primitive_screen_bounds[primitive_idx], sizeof(ushort4),
+    cuda::memcpy_async(&collected_geometry[shared_idx],
+                       &primitive_geometry[primitive_idx], sizeof(float4),
                        pipeline);
     cuda::memcpy_async(&collected_conic_opacity[shared_idx],
                        &primitive_conic_opacity[primitive_idx], sizeof(float4),
                        pipeline);
     cuda::memcpy_async(&collected_color[shared_idx],
-                       &primitive_color[primitive_idx], sizeof(float3),
+                       &primitive_color[primitive_idx], sizeof(float4),
                        pipeline);
   };
 
@@ -475,8 +487,10 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
       bool subtile_hit = false;
       const auto fetch_base = warp_fetch_iterations * config::warp_size;
       if (fetch_base + lane_rank < current_batch_size) {
+        const float4 geometry_record =
+            collected_geometry[stage_offset + fetch_base + lane_rank];
         const auto [splat_left, splat_right, splat_top, splat_bottom] =
-            collected_screen_bounds[stage_offset + fetch_base + lane_rank];
+            unpack_screen_bounds_from_geometry(geometry_record);
         subtile_hit = splat_left < subtile_right &&
                       subtile_left < splat_right &&
                       splat_top < subtile_bottom && subtile_top < splat_bottom;
@@ -494,8 +508,10 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
             collected_conic_opacity[stage_offset + fetch_base + j];
         const auto [conic_x, conic_y, conic_z] = make_float3(conic_opacity);
         const float opacity = conic_opacity.w;
+        const float4 geometry_record =
+            collected_geometry[stage_offset + fetch_base + j];
         const auto [delta_x, delta_y] =
-            collected_mean2d[stage_offset + fetch_base + j] - pixel;
+            make_float2(geometry_record.x, geometry_record.y) - pixel;
         const float exponent = -0.5f * (conic_x * delta_x * delta_x +
                                         conic_z * delta_y * delta_y) -
                                conic_y * delta_x * delta_y;
@@ -508,7 +524,7 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
 
         // blend fragment into pixel color
         color_pixel += transmittance * alpha *
-                       collected_color[stage_offset + fetch_base + j];
+                       make_float3(collected_color[stage_offset + fetch_base + j]);
 
         // update transmittance
         transmittance *= 1.0f - alpha;

@@ -49,9 +49,12 @@ namespace faster_gs::rasterization {
         cub::DoubleBuffer<uint> primitive_indices;
         uint* n_touched_tiles;
         uint* offset;
+        // Packed inference path geometry: {mean2d.x, mean2d.y, packed_bounds0, packed_bounds1}
+        float4* primitive_geometry;
         ushort4* screen_bounds;
         float2* mean2d;
         float4* conic_opacity;
+        float4* color_rgba;
         float3* color;
         uint* n_visible_primitives;
         uint* n_instances;
@@ -70,9 +73,11 @@ namespace faster_gs::rasterization {
             buffers.primitive_indices = cub::DoubleBuffer<uint>(primitive_indices_current, primitive_indices_alternate);
             obtain(blob, buffers.n_touched_tiles, n_primitives);
             obtain(blob, buffers.offset, n_primitives);
+            obtain(blob, buffers.primitive_geometry, n_primitives);
             obtain(blob, buffers.screen_bounds, n_primitives);
             obtain(blob, buffers.mean2d, n_primitives);
             obtain(blob, buffers.conic_opacity, n_primitives);
+            obtain(blob, buffers.color_rgba, n_primitives);
             obtain(blob, buffers.color, n_primitives);
             cub::DeviceScan::ExclusiveSum(
                 nullptr, buffers.cub_workspace_size,
