@@ -261,9 +261,9 @@ namespace faster_gs::rasterization::kernels::backward {
         const uint2* __restrict__ tile_instance_ranges,
         const uint* __restrict__ tile_bucket_offsets,
         const uint* __restrict__ instance_primitive_indices,
-        const float2* __restrict__ primitive_mean2d,
+        const float4* __restrict__ primitive_geometry,
         const float4* __restrict__ primitive_conic_opacity,
-        const float3* __restrict__ primitive_color,
+        const float4* __restrict__ primitive_color_rgba,
         const float3* __restrict__ bg_color,
         const float* __restrict__ grad_image,
         const float* __restrict__ image,
@@ -307,11 +307,13 @@ namespace faster_gs::rasterization::kernels::backward {
         float3 color_grad_factor = {0.0f, 0.0f, 0.0f};
         if (valid_primitive) {
             primitive_idx = instance_primitive_indices[instance_idx];
-            mean2d = primitive_mean2d[primitive_idx];
+            const float4 geometry = primitive_geometry[primitive_idx];
+            mean2d = make_float2(geometry.x, geometry.y);
             const float4 conic_opacity = primitive_conic_opacity[primitive_idx];
             conic = make_float3(conic_opacity);
             opacity = conic_opacity.w;
-            const float3 color_unclamped = primitive_color[primitive_idx];
+            const float3 color_unclamped =
+                make_float3(primitive_color_rgba[primitive_idx]);
             color = fmaxf(color_unclamped, 0.0f);
             if (color_unclamped.x >= 0.0f) color_grad_factor.x = 1.0f;
             if (color_unclamped.y >= 0.0f) color_grad_factor.y = 1.0f;

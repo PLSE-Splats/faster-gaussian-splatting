@@ -89,7 +89,6 @@ struct PrimitiveBuffers {
   float4* primitive_geometry;
   float4* conic_opacity;
   float4* color_rgba;
-  float3* color;
   uint* n_visible_primitives;
   uint* n_instances;
 
@@ -112,7 +111,6 @@ struct PrimitiveBuffers {
     obtain(blob, buffers.primitive_geometry, n_primitives);
     obtain(blob, buffers.conic_opacity, n_primitives);
     obtain(blob, buffers.color_rgba, n_primitives);
-    obtain(blob, buffers.color, n_primitives);
     cub::DeviceScan::ExclusiveSum(nullptr, buffers.cub_workspace_size,
                                   buffers.offset, buffers.offset, n_primitives);
     size_t sorting_workspace_size;

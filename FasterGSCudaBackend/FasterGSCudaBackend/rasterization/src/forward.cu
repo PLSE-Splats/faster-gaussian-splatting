@@ -61,7 +61,7 @@ std::tuple<int, int, int> faster_gs::rasterization::forward(
           primitive_buffers.primitive_indices.Current(),
           primitive_buffers.n_touched_tiles,
           primitive_buffers.primitive_geometry, primitive_buffers.conic_opacity,
-          primitive_buffers.color, primitive_buffers.n_visible_primitives,
+          primitive_buffers.color_rgba, primitive_buffers.n_visible_primitives,
           primitive_buffers.n_instances, n_primitives, grid.x, grid.y,
           active_sh_bases, total_sh_bases, static_cast<float>(width),
           static_cast<float>(height), focal_x, focal_y, center_x, center_y,
@@ -130,14 +130,15 @@ void faster_gs::rasterization::diff_rasterize(
   InstanceBuffers<KeyT> instance_buffers = InstanceBuffers<KeyT>::from_blob(
       instance_buffers_blob, n_instances, end_bit);
 
-  kernels::forward::create_instances_cu<KeyT><<<
-      div_round_up(n_visible_primitives, config::block_size_create_instances),
-      config::block_size_create_instances>>>(
-      primitive_buffers.primitive_indices.Current(), primitive_buffers.offset,
-      primitive_buffers.screen_bounds, primitive_buffers.mean2d,
-      primitive_buffers.conic_opacity, instance_buffers.keys.Current(),
-      instance_buffers.primitive_indices.Current(), grid.x,
-      n_visible_primitives);
+  kernels::forward::create_instances_cu<KeyT>
+      <<<div_round_up(n_visible_primitives,
+                      config::block_size_create_instances),
+         config::block_size_create_instances>>>(
+          primitive_buffers.primitive_indices.Current(),
+          primitive_buffers.offset, primitive_buffers.primitive_geometry,
+          primitive_buffers.conic_opacity, instance_buffers.keys.Current(),
+          instance_buffers.primitive_indices.Current(), grid.x,
+          n_visible_primitives);
   CHECK_CUDA(config::debug, "create_instances")
 
   cub::DeviceRadixSort::SortPairs(
@@ -183,8 +184,9 @@ void faster_gs::rasterization::diff_rasterize(
 
   kernels::forward::blend_cu<<<grid, block>>>(
       tile_buffers.instance_ranges, tile_buffers.buckets_offset,
-      instance_buffers.primitive_indices.Current(), primitive_buffers.mean2d,
-      primitive_buffers.conic_opacity, primitive_buffers.color, bg_color, image,
+      instance_buffers.primitive_indices.Current(),
+      primitive_buffers.primitive_geometry, primitive_buffers.conic_opacity,
+      primitive_buffers.color_rgba, bg_color, image,
       tile_buffers.final_transmittances, tile_buffers.max_n_processed,
       tile_buffers.n_processed, bucket_buffers.tile_index,
       bucket_buffers.color_transmittance, width, height, grid.x);
