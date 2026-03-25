@@ -12,21 +12,6 @@ namespace cg = cooperative_groups;
 
 namespace faster_gs::rasterization::kernels::inference {
 
-__device__ __forceinline__ uint pack_bounds_xy(ushort min_bound,
-                                               ushort max_bound) {
-  return static_cast<uint>(min_bound) | (static_cast<uint>(max_bound) << 16);
-}
-
-__device__ __forceinline__ ushort4 unpack_screen_bounds_from_geometry(
-    const float4 geometry_record) {
-  const uint packed_x = __float_as_uint(geometry_record.z);
-  const uint packed_y = __float_as_uint(geometry_record.w);
-  return make_ushort4(static_cast<ushort>(packed_x & 0xFFFFu),
-                      static_cast<ushort>((packed_x >> 16) & 0xFFFFu),
-                      static_cast<ushort>(packed_y & 0xFFFFu),
-                      static_cast<ushort>((packed_y >> 16) & 0xFFFFu));
-}
-
 __global__ void preprocess_cu(
     const float3* __restrict__ means, const float3* __restrict__ scales,
     const float4* __restrict__ rotations, const float* __restrict__ opacities,
@@ -195,10 +180,10 @@ __global__ void preprocess_cu(
 
   // store results
   primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
-  primitive_geometry[primitive_idx] =
-      make_float4(mean2d.x, mean2d.y,
-                  __uint_as_float(pack_bounds_xy(screen_bounds.x, screen_bounds.y)),
-                  __uint_as_float(pack_bounds_xy(screen_bounds.z, screen_bounds.w)));
+  primitive_geometry[primitive_idx] = make_float4(
+      mean2d.x, mean2d.y,
+      __uint_as_float(pack_bounds_xy(screen_bounds.x, screen_bounds.y)),
+      __uint_as_float(pack_bounds_xy(screen_bounds.z, screen_bounds.w)));
   primitive_conic_opacity[primitive_idx] = make_float4(conic, opacity);
   const float3 color = convert_sh_to_color(
       sh_coefficients_0, sh_coefficients_rest, mean3d, cam_position[0],
@@ -463,7 +448,8 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
       bool subtile_hit = false;
       const auto fetch_base = warp_fetch_iterations * config::warp_size;
       if (fetch_base + lane_rank < current_batch_size) {
-        const float4 geometry_record = collected_geometry[fetch_base + lane_rank];
+        const float4 geometry_record =
+            collected_geometry[fetch_base + lane_rank];
         const auto [splat_left, splat_right, splat_top, splat_bottom] =
             unpack_screen_bounds_from_geometry(geometry_record);
         subtile_hit = splat_left < subtile_right &&
@@ -496,8 +482,8 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
         if (alpha < config::min_alpha_threshold) continue;
 
         // blend fragment into pixel color
-        color_pixel +=
-            transmittance * alpha * make_float3(collected_color[fetch_base + j]);
+        color_pixel += transmittance * alpha *
+                       make_float3(collected_color[fetch_base + j]);
 
         // update transmittance
         transmittance *= 1.0f - alpha;
