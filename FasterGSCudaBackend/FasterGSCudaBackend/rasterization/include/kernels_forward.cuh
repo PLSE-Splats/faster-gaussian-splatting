@@ -497,7 +497,6 @@ __global__ void __launch_bounds__(config::block_size_blend)
 
       // Work through this batch.
       uint pending_splats = subtile_hit_ballot;
-      const uint n_processed_before_fetch = n_processed;
       while (!done && pending_splats != 0u) {
         const int j = __ffs(static_cast<int>(pending_splats)) - 1;
         pending_splats &= pending_splats - 1;
@@ -527,7 +526,7 @@ __global__ void __launch_bounds__(config::block_size_blend)
         transmittance *= 1.0f - alpha;
 
         // update the number of used Gaussians
-        n_processed_and_used = n_processed_before_fetch + j + 1;
+        n_processed_and_used = n_processed + j + 1;
 
         // early stopping
         if (transmittance < config::transmittance_threshold) {
