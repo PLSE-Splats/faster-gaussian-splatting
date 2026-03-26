@@ -14,6 +14,30 @@ namespace cg = cooperative_groups;
 
 namespace faster_gs::rasterization::kernels::backward {
 
+// Helper function to reconstruct pixel coordinates from cached slot index
+// using the same warp/subtile mapping as the optimized forward pass.
+__device__ __forceinline__ uint2
+pixel_coords_from_cached_slot(const uint2 start_pixel_coords,
+                               const uint linear_idx) {
+  // Decode using warp/subtile layout:
+  // thread_rank -> warp_rank + lane_rank
+  // subtile_x = warp_rank % subtile_per_row
+  // subtile_y = warp_rank / subtile_per_row
+  // pixel_x = subtile_origin_x + lane_rank % warp_tile_width
+  // pixel_y = subtile_origin_y + lane_rank / warp_tile_width
+  const uint warp_rank = linear_idx / config::warp_size;
+  const uint lane_rank = linear_idx % config::warp_size;
+  const uint subtile_x = warp_rank % config::subtile_per_row;
+  const uint subtile_y = warp_rank / config::subtile_per_row;
+  const uint subtile_origin_x =
+      start_pixel_coords.x + subtile_x * config::warp_tile_width;
+  const uint subtile_origin_y =
+      start_pixel_coords.y + subtile_y * config::warp_tile_height;
+  const uint pixel_x = subtile_origin_x + lane_rank % config::warp_tile_width;
+  const uint pixel_y = subtile_origin_y + lane_rank / config::warp_tile_width;
+  return make_uint2(pixel_x, pixel_y);
+}
+
 __global__ void preprocess_backward_cu(
     const float3* __restrict__ means, const float3* __restrict__ scales,
     const float4* __restrict__ rotations, const float* __restrict__ opacities,
@@ -298,6 +322,21 @@ __global__ void blend_backward_cu(
     float3* __restrict__ grad_sh_coefficients_0, const uint n_primitives,
     const uint width, const uint height, const uint grid_width,
     const bool proper_antialiasing) {
+  // Static asserts to document layout assumptions (must match forward pass)
+  static_assert(config::warp_tile_width * config::warp_tile_height ==
+                    config::warp_size,
+                "Subtile dimensions must match warp size");
+  static_assert(config::tile_width * config::tile_height ==
+                    config::block_size_blend,
+                "Tile dimensions must match block size");
+  static_assert(config::subtile_per_row * config::warp_tile_width ==
+                    config::tile_width,
+                "Subtile row count must match tile width");
+  static_assert(config::tile_height / config::warp_tile_height ==
+                    config::block_size_blend / config::warp_size /
+                        config::subtile_per_row,
+                "Number of subtile rows must be consistent");
+  
   auto block = cg::this_thread_block();
   auto warp = cg::tiled_partition<32>(block);
   const uint bucket_idx = block.group_index().x;
@@ -371,9 +410,8 @@ __global__ void blend_backward_cu(
       if (local_idx < config::block_size_blend) {
         const float4 color_transmittance =
             bucket_color_transmittance[local_idx];
-        const uint2 pixel_coords = {
-            start_pixel_coords.x + local_idx % config::tile_width,
-            start_pixel_coords.y + local_idx / config::tile_width};
+        const uint2 pixel_coords =
+            pixel_coords_from_cached_slot(start_pixel_coords, local_idx);
         const uint pixel_idx = width * pixel_coords.y + pixel_coords.x;
         // final values from forward pass before background blend and the
         // respective gradients
@@ -413,10 +451,14 @@ __global__ void blend_backward_cu(
 
     // which pixel index should this thread deal with?
     const int idx = i - static_cast<int>(lane_idx);
-    const uint2 pixel_coords = {
-        start_pixel_coords.x + idx % config::tile_width,
-        start_pixel_coords.y + idx / config::tile_width};
-    const bool valid_pixel = pixel_coords.x < width && pixel_coords.y < height;
+    // Guard against negative idx before casting to uint for pixel coord reconstruction
+    const uint2 pixel_coords =
+        (idx >= 0 && idx < config::block_size_blend)
+            ? pixel_coords_from_cached_slot(start_pixel_coords,
+                                             static_cast<uint>(idx))
+            : make_uint2(0, 0);
+    const bool valid_pixel = idx >= 0 && idx < config::block_size_blend &&
+                              pixel_coords.x < width && pixel_coords.y < height;
 
     // leader thread loads values from shared memory into registers
     if (valid_primitive && valid_pixel && lane_idx == 0 &&

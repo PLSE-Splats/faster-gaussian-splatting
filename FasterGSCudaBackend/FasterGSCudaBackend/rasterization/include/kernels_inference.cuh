@@ -479,7 +479,9 @@ __global__ inline void __launch_bounds__(config::block_size_blend)
                       gaussian < config::min_alpha_threshold)
           continue;
         const float alpha = opacity * gaussian;
-        if (alpha < config::min_alpha_threshold) continue;
+        if (config::original_opacity_interpretation &&
+            alpha < config::min_alpha_threshold)
+          continue;
 
         // blend fragment into pixel color
         color_pixel += transmittance * alpha *

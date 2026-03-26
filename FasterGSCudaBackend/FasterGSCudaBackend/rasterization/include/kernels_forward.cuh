@@ -391,6 +391,21 @@ __global__ void __launch_bounds__(config::block_size_blend)
              uint* __restrict__ bucket_tile_index,
              float4* __restrict__ bucket_color_transmittance, const uint width,
              const uint height, const uint grid_width) {
+  // Static asserts to document layout assumptions
+  static_assert(config::warp_tile_width * config::warp_tile_height ==
+                    config::warp_size,
+                "Subtile dimensions must match warp size");
+  static_assert(config::tile_width * config::tile_height ==
+                    config::block_size_blend,
+                "Tile dimensions must match block size");
+  static_assert(config::subtile_per_row * config::warp_tile_width ==
+                    config::tile_width,
+                "Subtile row count must match tile width");
+  static_assert(config::tile_height / config::warp_tile_height ==
+                    config::block_size_blend / config::warp_size /
+                        config::subtile_per_row,
+                "Number of subtile rows must be consistent");
+  
   // Get tile info.
   const auto block = cg::this_thread_block();
   const auto group_index = block.group_index();
@@ -468,18 +483,23 @@ __global__ void __launch_bounds__(config::block_size_blend)
     block.sync();
     const int current_batch_size =
         min(config::warp_fetch_size, n_points_remaining);
+    // Number of active 32-splat warp chunks in this batch
+    const int n_warp_chunks = div_round_up(current_batch_size, config::warp_size);
 
     // Iterate through the fetch.
 #pragma unroll
     for (int warp_fetch_iterations = 0;
          warp_fetch_iterations < config::warp_fetch_size / config::warp_size;
          ++warp_fetch_iterations) {
-      // Store current color and transmittance every 32 Gaussians.
-      const float4 current_color_transmittance =
-          make_float4(color_pixel, transmittance);
-      bucket_color_transmittance[bucket_offset * config::block_size_blend +
-                                 thread_rank] = current_color_transmittance;
-      bucket_offset++;
+      // Store current color and transmittance every 32 Gaussians,
+      // but only for real warp chunks that exist in current_batch_size.
+      if (warp_fetch_iterations < n_warp_chunks) {
+        const float4 current_color_transmittance =
+            make_float4(color_pixel, transmittance);
+        bucket_color_transmittance[bucket_offset * config::block_size_blend +
+                                   thread_rank] = current_color_transmittance;
+        bucket_offset++;
+      }
 
       // Subtile hit test and warp ballot broadcast result.
       bool subtile_hit = false;
@@ -516,7 +536,9 @@ __global__ void __launch_bounds__(config::block_size_blend)
                       gaussian < config::min_alpha_threshold)
           continue;
         const float alpha = opacity * gaussian;
-        if (alpha < config::min_alpha_threshold) continue;
+        if (config::original_opacity_interpretation &&
+            alpha < config::min_alpha_threshold)
+          continue;
 
         // blend fragment into pixel color
         color_pixel += transmittance * alpha *
