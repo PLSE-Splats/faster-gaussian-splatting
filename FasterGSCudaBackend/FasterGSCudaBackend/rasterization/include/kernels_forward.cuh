@@ -474,14 +474,12 @@ __global__ void __launch_bounds__(config::block_size_blend)
     for (int warp_fetch_iterations = 0;
          warp_fetch_iterations < config::warp_fetch_size / config::warp_size;
          ++warp_fetch_iterations) {
-      // store current color and transmittance every 32 Gaussians
-      {
-        const float4 current_color_transmittance =
-            make_float4(color_pixel, transmittance);
-        bucket_color_transmittance[bucket_offset * config::block_size_blend +
-                                   thread_rank] = current_color_transmittance;
-        bucket_offset++;
-      }
+      // Store current color and transmittance every 32 Gaussians.
+      const float4 current_color_transmittance =
+          make_float4(color_pixel, transmittance);
+      bucket_color_transmittance[bucket_offset * config::block_size_blend +
+                                 thread_rank] = current_color_transmittance;
+      bucket_offset++;
 
       // Subtile hit test and warp ballot broadcast result.
       bool subtile_hit = false;
@@ -497,11 +495,9 @@ __global__ void __launch_bounds__(config::block_size_blend)
       }
       const uint subtile_hit_ballot = warp.ballot(subtile_hit);
 
-      // track the number of processed Gaussians
-      n_processed += 32;
-
       // Work through this batch.
       uint pending_splats = subtile_hit_ballot;
+      const uint n_processed_before_fetch = n_processed;
       while (!done && pending_splats != 0u) {
         const int j = __ffs(static_cast<int>(pending_splats)) - 1;
         pending_splats &= pending_splats - 1;
@@ -531,13 +527,16 @@ __global__ void __launch_bounds__(config::block_size_blend)
         transmittance *= 1.0f - alpha;
 
         // update the number of used Gaussians
-        n_processed_and_used = n_processed;
+        n_processed_and_used = n_processed_before_fetch + j + 1;
 
         // early stopping
         if (transmittance < config::transmittance_threshold) {
           done = true;
         }
       }
+
+      // Track the number of processed Gaussians.
+      n_processed += config::warp_size;
     }
   }
   if (inside) {
