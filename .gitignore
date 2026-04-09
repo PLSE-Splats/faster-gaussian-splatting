@@ -23,3 +23,4 @@ imgui.ini
 __pycache__/
 !CMakeLists.txt
 /compile_commands.json
+!docs/teaser.png
