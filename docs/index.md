@@ -22,3 +22,11 @@ See the implementation in our [fork of Faster-GS](https://github.com/PLSE-Splats
 ## Contact
 
 Kenneth J. Yang: kjy5@uw.edu
+
+## Paper corrections
+
+- Table 5 duration units should be _microseconds_.
+
+## HPG 2026 talk slides
+
+[HPG Talk.pdf](https://github.com/user-attachments/files/30113676/HPG.Talk.pdf)
