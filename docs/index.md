@@ -29,4 +29,5 @@ Kenneth J. Yang: kjy5@uw.edu
 
 ## HPG 2026 talk slides
 
-[HPG Talk.pdf](https://github.com/user-attachments/files/30113676/HPG.Talk.pdf)
+[HPG Talk.pdf](https://github.com/user-attachments/files/30147983/HPG.Talk.pdf)
+
