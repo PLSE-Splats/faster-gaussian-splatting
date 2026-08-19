@@ -31,3 +31,5 @@ Kenneth J. Yang: kjy5@uw.edu
 
 [HPG Talk.pdf](https://github.com/user-attachments/files/30147983/HPG.Talk.pdf)
 
+## ACM Reference
+> Kenneth Yang, George Drettakis, and Gilbert Bernstein. 2026. Warp-Level Culling for Efficient Blending in 3D Gaussian Splatting. Proc. ACM Comput. Graph. Interact. Tech. 9, 4, Article 54 (July 2026), 14 pages. https://doi.org/10.1145/3820019
